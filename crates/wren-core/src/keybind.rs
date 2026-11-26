@@ -1,11 +1,15 @@
 //! Keybinding triggers, platform defaults, and user overrides.
 //!
 //! Triggers use Ghostty/Roost syntax (`super+shift+p`, `alt+bracketleft`).
-//! macOS uses Command as the app modifier; Linux uses Alt so Ctrl stays with
-//! text editing (Ctrl+Z/C/V/A inside the editor and inputs). Actions are the
-//! stable command keys (`navigation.jump`, `palette.commands`, …); this module
-//! does not know the command table, so callers validate action names.
+//! Default tables, and `keybind` lines, may also name two logical
+//! modifiers, which a [`Scheme`] resolves: `mod`, the command key (⌘ on
+//! macOS; Ctrl on Linux, or Alt with `linux-modifier = alt`), and `opt`, the
+//! board's secondary key (⌥ on macOS; on Linux whichever of Ctrl and Alt
+//! `mod` is not). Actions are the stable command keys (`navigation.jump`,
+//! `palette.commands`, …); this module does not know the command table, so
+//! callers validate action names.
 
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -23,7 +27,7 @@ pub struct Accel {
     pub key: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     Mac,
     Linux,
@@ -37,13 +41,121 @@ impl Platform {
             Self::Linux
         }
     }
+}
 
-    /// The modifier name app commands use by default.
-    pub const fn primary(self) -> &'static str {
-        match self {
-            Self::Mac => "super",
-            Self::Linux => "alt",
+/// Linux's command key, the `linux-modifier` setting. macOS always uses ⌘.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum LinuxModifier {
+    /// Ctrl, as other Linux apps use.
+    #[default]
+    Ctrl,
+    /// Alt, the way ⌘ works on the Mac, leaving Ctrl to text editing.
+    Alt,
+}
+
+impl LinuxModifier {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ctrl" => Some(Self::Ctrl),
+            "alt" => Some(Self::Alt),
+            _ => None,
         }
+    }
+
+    /// The config-file spelling.
+    pub const fn value(self) -> &'static str {
+        match self {
+            Self::Ctrl => "ctrl",
+            Self::Alt => "alt",
+        }
+    }
+}
+
+/// The two logical modifiers of default tables and `keybind` lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Logical {
+    /// `mod`: the command key.
+    Mod,
+    /// `opt`: the board's secondary key, beside `mod` on the arrows.
+    Opt,
+}
+
+/// What a keymap is built for: the platform and Linux's command key, which
+/// together say what `mod` and `opt` stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Scheme {
+    pub platform: Platform,
+    /// Read on Linux only.
+    pub linux: LinuxModifier,
+}
+
+impl Default for Scheme {
+    fn default() -> Self {
+        Self::current(LinuxModifier::default())
+    }
+}
+
+impl Scheme {
+    pub const fn new(platform: Platform, linux: LinuxModifier) -> Self {
+        Self { platform, linux }
+    }
+
+    /// The scheme of the platform Wren runs on.
+    pub const fn current(linux: LinuxModifier) -> Self {
+        Self::new(Platform::current(), linux)
+    }
+
+    /// The modifier `token` stands for, as a trigger names it. A board
+    /// binds both Mod+arrow and Opt+arrow, so with Alt as Linux's command
+    /// key the secondary one is Ctrl.
+    pub const fn modifier(self, token: Logical) -> &'static str {
+        match (self.platform, self.linux, token) {
+            (Platform::Mac, _, Logical::Mod) => "super",
+            (Platform::Mac, _, Logical::Opt) => "alt",
+            (Platform::Linux, LinuxModifier::Ctrl, Logical::Mod) => "ctrl",
+            (Platform::Linux, LinuxModifier::Ctrl, Logical::Opt) => "alt",
+            (Platform::Linux, LinuxModifier::Alt, Logical::Mod) => "alt",
+            (Platform::Linux, LinuxModifier::Alt, Logical::Opt) => "ctrl",
+        }
+    }
+
+    /// `trigger` with its `mod` and `opt` replaced by what they stand for.
+    pub fn resolve(self, trigger: &str) -> String {
+        trigger
+            .split('+')
+            .map(|token| match logical(token) {
+                Some(token) => self.modifier(token),
+                None => token,
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// Parse a trigger that may name `mod` or `opt`.
+    pub fn parse(self, trigger: &str) -> Option<Accel> {
+        parse(trigger, Some(self))
+    }
+
+    /// Whether `accel` holds the command key, with or without Shift, and
+    /// nothing else.
+    #[cfg(test)]
+    fn is_mod(self, accel: &Accel) -> bool {
+        let mut mods = Mods {
+            shift: accel.mods.shift,
+            ..Mods::default()
+        };
+        if let Some(hold) = modifier(self.modifier(Logical::Mod)) {
+            hold(&mut mods);
+        }
+        accel.mods == mods
+    }
+}
+
+fn logical(token: &str) -> Option<Logical> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "mod" => Some(Logical::Mod),
+        "opt" => Some(Logical::Opt),
+        _ => None,
     }
 }
 
@@ -123,8 +235,13 @@ pub fn is_function_key(key: &str) -> bool {
 }
 
 /// Parse a trigger such as `super+shift+p`. The last non-modifier token is
-/// the key; `+` itself may be written as `plus`.
+/// the key; `+` itself may be written as `plus`. Here `opt` is Alt and `mod`
+/// is no modifier; [`Scheme::parse`] reads both as the logical ones.
 pub fn parse_trigger(trigger: &str) -> Option<Accel> {
+    parse(trigger, None)
+}
+
+fn parse(trigger: &str, scheme: Option<Scheme>) -> Option<Accel> {
     let mut mods = Mods::default();
     let mut key = None;
     for token in trigger.trim().split('+') {
@@ -132,9 +249,13 @@ pub fn parse_trigger(trigger: &str) -> Option<Accel> {
         if token.is_empty() {
             return None;
         }
-        match modifier(&token) {
+        let token = match (scheme, logical(&token)) {
+            (Some(scheme), Some(logical)) => scheme.modifier(logical),
+            _ => token.as_str(),
+        };
+        match modifier(token) {
             Some(apply) => apply(&mut mods),
-            None if key.is_none() => key = Some(canonical_key(&token)?),
+            None if key.is_none() => key = Some(canonical_key(token)?),
             None => return None,
         }
     }
@@ -229,76 +350,103 @@ impl fmt::Display for Accel {
     }
 }
 
+/// The `edit.*` actions on their key, which a default table puts after a
+/// modifier. They are Linux defaults only: on macOS the editor and the Edit
+/// menu own ⌘Z, ⌘C and the rest.
+const EDIT_KEYS: [(&str, &str); 6] = [
+    ("z", "edit.undo"),
+    ("shift+z", "edit.redo"),
+    ("c", "edit.copy"),
+    ("x", "edit.cut"),
+    ("v", "edit.paste"),
+    ("a", "edit.select_all"),
+];
+
+fn resolved(
+    scheme: Scheme,
+    bindings: impl IntoIterator<Item = (String, &'static str)>,
+) -> Vec<(String, &'static str)> {
+    bindings
+        .into_iter()
+        .map(|(trigger, action)| (scheme.resolve(&trigger), action))
+        .collect()
+}
+
+fn owned(bindings: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
+    bindings
+        .iter()
+        .map(|(trigger, action)| ((*trigger).to_string(), *action))
+        .collect()
+}
+
 /// Default `(trigger, action)` pairs, in display-priority order: the first
 /// trigger listed for an action is the one menus and buttons show.
-pub fn default_bindings(platform: Platform) -> Vec<(String, &'static str)> {
-    let p = platform.primary();
-    let mut bindings = vec![
-        (format!("{p}+shift+p"), "palette.commands"),
-        (format!("{p}+k"), "palette.commands"),
-        (format!("{p}+p"), "navigation.jump"),
-        (format!("{p}+shift+f"), "navigation.search"),
-        (format!("{p}+f"), "navigation.find"),
-        (format!("{p}+shift+o"), "navigation.outline"),
-        (format!("{p}+n"), "note.new"),
-        (format!("{p}+shift+n"), "note.new_dated"),
-        (format!("{p}+bracketleft"), "navigation.back"),
-        (format!("{p}+bracketright"), "navigation.forward"),
-        (format!("{p}+shift+bracketleft"), "navigation.column_left"),
-        (format!("{p}+shift+bracketright"), "navigation.column_right"),
-        (format!("{p}+r"), "note.rename"),
-        (format!("{p}+y"), "view.focus"),
-        (format!("{p}+shift+y"), "view.collapse_columns"),
+pub fn default_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
+    let mut bindings: Vec<(String, &'static str)> = owned(&[
+        ("mod+shift+p", "palette.commands"),
+        ("mod+k", "palette.commands"),
+        ("mod+p", "navigation.jump"),
+        ("mod+shift+f", "navigation.search"),
+        ("mod+f", "navigation.find"),
+        ("mod+shift+o", "navigation.outline"),
+        ("mod+n", "note.new"),
+        ("mod+shift+n", "note.new_dated"),
+        ("mod+bracketleft", "navigation.back"),
+        ("mod+bracketright", "navigation.forward"),
+        ("mod+shift+bracketleft", "navigation.column_left"),
+        ("mod+shift+bracketright", "navigation.column_right"),
+        ("mod+r", "note.rename"),
+        ("mod+y", "view.focus"),
+        ("mod+shift+y", "view.collapse_columns"),
         // `+` is Shift+`=` on US layouts, and most people press it unshifted.
         // Toolkits report the shifted press as either key, so bind both.
-        (format!("{p}+plus"), "font.increase"),
-        (format!("{p}+equal"), "font.increase"),
-        (format!("{p}+shift+equal"), "font.increase"),
-        (format!("{p}+shift+plus"), "font.increase"),
-        (format!("{p}+minus"), "font.decrease"),
-        (format!("{p}+0"), "font.reset"),
-    ];
-    // Editor commands take the platform's text-formatting modifier, which is
-    // Ctrl on Linux, where Alt belongs to the app.
-    let e = match platform {
-        Platform::Mac => "super",
-        Platform::Linux => "ctrl",
-    };
-    bindings.extend([
-        (format!("{e}+enter"), "markdown.toggle_task"),
-        (format!("{e}+b"), "markdown.bold"),
-        (format!("{e}+i"), "markdown.italic"),
-        (format!("{e}+e"), "markdown.code"),
-        ("alt+up".to_string(), "edit.move_line_up"),
-        ("alt+down".to_string(), "edit.move_line_down"),
-        // Ctrl+., the usual "quick fix" key, is the emoji key of IBus on
-        // GNOME and never reaches the app there.
-        (format!("{p}+period"), "editor.spell_suggest"),
+        ("mod+plus", "font.increase"),
+        ("mod+equal", "font.increase"),
+        ("mod+shift+equal", "font.increase"),
+        ("mod+shift+plus", "font.increase"),
+        ("mod+minus", "font.decrease"),
+        ("mod+0", "font.reset"),
+        ("mod+enter", "markdown.toggle_task"),
+        ("mod+b", "markdown.bold"),
+        ("mod+i", "markdown.italic"),
+        ("mod+e", "markdown.code"),
+        // Move line is Alt+↑/↓ in both Linux modes, as in code editors.
+        ("alt+up", "edit.move_line_up"),
+        ("alt+down", "edit.move_line_down"),
     ]);
-    match platform {
-        Platform::Mac => bindings.extend([
-            ("super+comma".to_string(), "settings.open"),
-            ("super+q".to_string(), "app.quit"),
-        ]),
-        Platform::Linux => bindings.extend([
-            // Find is an editor gesture; keep the universal Ctrl+F too.
-            ("ctrl+f".to_string(), "navigation.find"),
-            ("ctrl+q".to_string(), "app.quit"),
-        ]),
+    // Ctrl+., the usual "quick fix" key, is the emoji key of IBus on GNOME
+    // and never reaches the app there.
+    let suggest = match (scheme.platform, scheme.linux) {
+        (Platform::Linux, LinuxModifier::Ctrl) => "alt+period",
+        _ => "mod+period",
+    };
+    bindings.push((suggest.to_string(), "editor.spell_suggest"));
+    bindings.extend(owned(&[
+        ("mod+comma", "settings.open"),
+        ("mod+q", "app.quit"),
+    ]));
+    if scheme.platform == Platform::Linux {
+        bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("mod+{key}"), action)));
+        // With Alt as the command key, the desktop's Ctrl habits keep
+        // working: find, quit, and every text field's editing keys.
+        if scheme.linux == LinuxModifier::Alt {
+            bindings.extend(owned(&[
+                ("ctrl+f", "navigation.find"),
+                ("ctrl+q", "app.quit"),
+            ]));
+            bindings.extend(EDIT_KEYS.map(|(key, action)| (format!("ctrl+{key}"), action)));
+        }
     }
-    bindings
+    resolved(scheme, bindings)
 }
 
 /// Default board-layer `(trigger, action)` pairs, in display-priority order.
-/// Board commands take the text-formatting modifier, ⌘ or Ctrl; a trigger
+/// Board commands take `mod`, and stepping and resizing `opt`; a trigger
 /// they share with the base layer is one only an editor command uses there
-/// (Mod+Enter, Alt+Up and Alt+Down), so it never shadows an app shortcut.
-pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)> {
-    let m = match platform {
-        Platform::Mac => "super",
-        Platform::Linux => "ctrl",
-    };
-    let mut bindings: Vec<(String, &'static str)> = [
+/// (Mod+Enter, the `edit.*` keys, Alt+Up and Alt+Down), so it never shadows
+/// an app shortcut.
+pub fn default_board_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
+    let mut bindings: Vec<(String, &'static str)> = owned(&[
         ("v", "board.tool.select"),
         ("h", "board.tool.hand"),
         ("r", "board.tool.rectangle"),
@@ -338,10 +486,7 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
         ("/", "board.actions"),
         ("shift+f10", "board.actions"),
         ("shift+/", "board.keys"),
-    ]
-    .into_iter()
-    .map(|(trigger, action)| (trigger.to_string(), action))
-    .collect();
+    ]);
     for (dir, [connect, select, extend, connector, step]) in [
         (
             "left",
@@ -385,86 +530,103 @@ pub fn default_board_bindings(platform: Platform) -> Vec<(String, &'static str)>
         ),
     ] {
         bindings.extend([
-            (format!("{m}+{dir}"), connect),
+            (format!("mod+{dir}"), connect),
             (dir.to_string(), select),
             (format!("shift+{dir}"), extend),
-            (format!("{m}+shift+{dir}"), connector),
-            (format!("alt+{dir}"), step),
+            (format!("mod+shift+{dir}"), connector),
+            (format!("opt+{dir}"), step),
         ]);
     }
-    bindings.extend([
-        ("alt+shift+right".to_string(), "board.resize.wider"),
-        ("alt+shift+left".to_string(), "board.resize.narrower"),
-        ("alt+shift+down".to_string(), "board.resize.taller"),
-        ("alt+shift+up".to_string(), "board.resize.shorter"),
-        (format!("{m}+enter"), "board.label.commit"),
-        (format!("{m}+a"), "board.select.all"),
-        (format!("{m}+shift+a"), "board.select.connected"),
-        (format!("{m}+d"), "board.duplicate"),
-        (format!("{m}+c"), "board.copy"),
-        (format!("{m}+x"), "board.cut"),
-        (format!("{m}+v"), "board.paste"),
-        (format!("{m}+z"), "board.undo"),
-        (format!("{m}+shift+z"), "board.redo"),
-    ]);
-    // ⌘Y is Focus mode on macOS; Ctrl+Y is the usual redo elsewhere.
-    if platform == Platform::Linux {
-        bindings.push(("ctrl+y".to_string(), "board.redo"));
+    bindings.extend(owned(&[
+        ("opt+shift+right", "board.resize.wider"),
+        ("opt+shift+left", "board.resize.narrower"),
+        ("opt+shift+down", "board.resize.taller"),
+        ("opt+shift+up", "board.resize.shorter"),
+        ("mod+enter", "board.label.commit"),
+        ("mod+a", "board.select.all"),
+        ("mod+shift+a", "board.select.connected"),
+        ("mod+d", "board.duplicate"),
+        ("mod+c", "board.copy"),
+        ("mod+x", "board.cut"),
+        ("mod+v", "board.paste"),
+        ("mod+z", "board.undo"),
+        ("mod+shift+z", "board.redo"),
+    ]));
+    // With Alt as the command key, the desktop's Ctrl editing keys keep
+    // working on a board too.
+    if scheme.platform == Platform::Linux && scheme.linux == LinuxModifier::Alt {
+        bindings.extend(owned(&[
+            ("ctrl+a", "board.select.all"),
+            ("ctrl+c", "board.copy"),
+            ("ctrl+x", "board.cut"),
+            ("ctrl+v", "board.paste"),
+            ("ctrl+z", "board.undo"),
+            ("ctrl+shift+z", "board.redo"),
+        ]));
     }
-    bindings
+    resolved(scheme, bindings)
 }
 
 /// Default `(trigger, action)` pairs of the task commands, which the keymap
 /// takes only while the `tasks` setting is on; with it off the keymap is the
 /// one without them, so their triggers do what they did before.
 ///
-/// `task.set_due` is ⌘D on macOS and Ctrl+D on Linux, and `task.edit`, the
-/// task form, ⇧⌘↵ and Ctrl+Shift+Enter (discovery/tasks.md §2 item 21):
-/// Editor commands, so the board layer's ⌘D / Ctrl+D, which only a focused
-/// board reads, keeps duplicating there.
-pub fn default_task_bindings(platform: Platform) -> Vec<(String, &'static str)> {
-    let m = match platform {
-        Platform::Mac => "super",
-        Platform::Linux => "ctrl",
-    };
-    vec![
-        (format!("{m}+d"), "task.set_due"),
-        (format!("{m}+shift+enter"), "task.edit"),
-    ]
+/// `task.set_due` is Mod+D, and `task.edit`, the task form, Mod+Shift+Enter
+/// (discovery/tasks.md §2 item 21): Editor commands, so the board layer's
+/// Mod+D, which only a focused board reads, keeps duplicating there.
+pub fn default_task_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
+    resolved(
+        scheme,
+        owned(&[("mod+d", "task.set_due"), ("mod+shift+enter", "task.edit")]),
+    )
 }
 
-/// The resolved trigger → action tables, one per [`Layer`].
+/// The resolved trigger → action tables, one per [`Layer`], and the
+/// [`Scheme`] they were resolved for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Keymap {
+    scheme: Scheme,
     base: Vec<(Accel, String)>,
     board: Vec<(Accel, String)>,
+    /// Base-layer triggers a user line unbinds and no later line binds.
+    unbound: Vec<Accel>,
 }
 
 impl Keymap {
     /// Apply `user` `(trigger, action)` overrides, in order, on top of
-    /// `defaults`. `layer_of` places each action in its layer, and `None`
-    /// means the action is unknown. A later binding for the same trigger
-    /// replaces the earlier one in its own layer only; `unbind` removes a
-    /// trigger from the base layer and `board.unbind` from the board layer.
-    /// Invalid lines are skipped with a warning. A default whose action
-    /// `layer_of` does not know is skipped, so one default list serves a
-    /// host that leaves some commands out.
+    /// `defaults`, reading `mod` and `opt` in either as `scheme` says, so a
+    /// keymap built again for another [`LinuxModifier`] moves a user's
+    /// `mod+…` line with the defaults. `layer_of` places each action in its
+    /// layer, and `None` means the action is unknown. A later binding for
+    /// the same trigger replaces the earlier one in its own layer only;
+    /// `unbind` removes a trigger from the base layer and `board.unbind`
+    /// from the board layer. Invalid lines are skipped with a warning. A
+    /// default whose action `layer_of` does not know is skipped, so one
+    /// default list serves a host that leaves some commands out.
     pub fn build<'a>(
+        scheme: Scheme,
         defaults: impl IntoIterator<Item = (String, &'a str)>,
         user: &[(String, String)],
         layer_of: impl Fn(&str) -> Option<Layer>,
     ) -> (Self, Vec<String>) {
-        let mut keymap = Self::default();
+        let mut keymap = Self {
+            scheme,
+            ..Self::default()
+        };
         let mut warnings = Vec::new();
+        // Each recorded unbind with the line that made it, so a later base
+        // binding clears one in constant time and the order stays the lines'.
+        let mut unbound: HashMap<Accel, usize> = HashMap::new();
+        let mut order = 0;
         for (trigger, action) in defaults {
-            if let (Some(accel), Some(layer)) = (parse_trigger(&trigger), layer_of(action)) {
+            if let (Some(accel), Some(layer)) = (scheme.parse(&trigger), layer_of(action)) {
                 let table = keymap.layer_mut(layer);
                 table.retain(|(bound, _)| *bound != accel);
                 table.push((accel, action.into()));
             }
         }
         for (trigger, action) in user {
-            let Some(accel) = parse_trigger(trigger) else {
+            let Some(accel) = scheme.parse(trigger) else {
                 warnings.push(format!("keybind: invalid trigger {trigger:?}"));
                 continue;
             };
@@ -495,6 +657,13 @@ impl Keymap {
                 warnings.push(needs_modifier());
                 continue;
             }
+            if layer == Layer::Base {
+                unbound.remove(&accel);
+                if unbind {
+                    unbound.insert(accel.clone(), order);
+                    order += 1;
+                }
+            }
             let table = keymap.layer_mut(layer);
             table.retain(|(bound, _)| *bound != accel);
             if !unbind {
@@ -502,7 +671,15 @@ impl Keymap {
                 table.insert(0, (accel, action.into()));
             }
         }
+        let mut unbound: Vec<_> = unbound.into_iter().collect();
+        unbound.sort_by_key(|(_, order)| *order);
+        keymap.unbound = unbound.into_iter().map(|(accel, _)| accel).collect();
         (keymap, warnings)
+    }
+
+    /// The scheme the keymap was built for.
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
     }
 
     fn layer_mut(&mut self, layer: Layer) -> &mut Vec<(Accel, String)> {
@@ -515,6 +692,12 @@ impl Keymap {
     /// The base layer's action for `accel`.
     pub fn action(&self, accel: &Accel) -> Option<&str> {
         find_action(&self.base, accel)
+    }
+
+    /// The base-layer triggers a `keybind` line unbinds, which no later
+    /// line binds again.
+    pub fn unbound(&self) -> &[Accel] {
+        &self.unbound
     }
 
     /// The board layer's action for `accel`.
@@ -567,6 +750,14 @@ fn iterate(table: &[(Accel, String)]) -> impl Iterator<Item = (&Accel, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    const MAC: Scheme = Scheme::new(Platform::Mac, LinuxModifier::Ctrl);
+    const CTRL: Scheme = Scheme::new(Platform::Linux, LinuxModifier::Ctrl);
+    const ALT: Scheme = Scheme::new(Platform::Linux, LinuxModifier::Alt);
+    /// Every scheme a default table is generated for. The Mac ignores the
+    /// Linux mode, which `the_mac_ignores_the_linux_modifier` checks.
+    const SCHEMES: [Scheme; 3] = [MAC, CTRL, ALT];
 
     fn accel(trigger: &str) -> Accel {
         parse_trigger(trigger).unwrap()
@@ -585,115 +776,407 @@ mod tests {
         })
     }
 
-    fn both_defaults(platform: Platform) -> Vec<(String, &'static str)> {
-        let mut defaults = default_bindings(platform);
-        defaults.extend(default_board_bindings(platform));
+    fn both_defaults(scheme: Scheme) -> Vec<(String, &'static str)> {
+        let mut defaults = default_bindings(scheme);
+        defaults.extend(default_board_bindings(scheme));
         defaults
     }
 
-    /// `default_bindings` as Wren 0.1.1 shipped it, plus its two additions:
-    /// spell check's suggest key and collapsing the columns to Notes. Boards
-    /// add a layer and must not change this one.
-    fn frozen_base(platform: Platform) -> Vec<(&'static str, &'static str)> {
-        let mut bindings = match platform {
-            Platform::Mac => vec![
-                ("super+shift+p", "palette.commands"),
-                ("super+k", "palette.commands"),
-                ("super+p", "navigation.jump"),
-                ("super+shift+f", "navigation.search"),
-                ("super+f", "navigation.find"),
-                ("super+shift+o", "navigation.outline"),
-                ("super+n", "note.new"),
-                ("super+shift+n", "note.new_dated"),
-                ("super+bracketleft", "navigation.back"),
-                ("super+bracketright", "navigation.forward"),
-                ("super+shift+bracketleft", "navigation.column_left"),
-                ("super+shift+bracketright", "navigation.column_right"),
-                ("super+r", "note.rename"),
-                ("super+y", "view.focus"),
-                ("super+shift+y", "view.collapse_columns"),
-                ("super+plus", "font.increase"),
-                ("super+equal", "font.increase"),
-                ("super+shift+equal", "font.increase"),
-                ("super+shift+plus", "font.increase"),
-                ("super+minus", "font.decrease"),
-                ("super+0", "font.reset"),
-                ("super+enter", "markdown.toggle_task"),
-                ("super+b", "markdown.bold"),
-                ("super+i", "markdown.italic"),
-                ("super+e", "markdown.code"),
-            ],
-            Platform::Linux => vec![
-                ("alt+shift+p", "palette.commands"),
-                ("alt+k", "palette.commands"),
-                ("alt+p", "navigation.jump"),
-                ("alt+shift+f", "navigation.search"),
-                ("alt+f", "navigation.find"),
-                ("alt+shift+o", "navigation.outline"),
-                ("alt+n", "note.new"),
-                ("alt+shift+n", "note.new_dated"),
-                ("alt+bracketleft", "navigation.back"),
-                ("alt+bracketright", "navigation.forward"),
-                ("alt+shift+bracketleft", "navigation.column_left"),
-                ("alt+shift+bracketright", "navigation.column_right"),
-                ("alt+r", "note.rename"),
-                ("alt+y", "view.focus"),
-                ("alt+shift+y", "view.collapse_columns"),
-                ("alt+plus", "font.increase"),
-                ("alt+equal", "font.increase"),
-                ("alt+shift+equal", "font.increase"),
-                ("alt+shift+plus", "font.increase"),
-                ("alt+minus", "font.decrease"),
-                ("alt+0", "font.reset"),
-                ("ctrl+enter", "markdown.toggle_task"),
-                ("ctrl+b", "markdown.bold"),
-                ("ctrl+i", "markdown.italic"),
-                ("ctrl+e", "markdown.code"),
-            ],
-        };
-        bindings.extend([
-            ("alt+up", "edit.move_line_up"),
-            ("alt+down", "edit.move_line_down"),
-        ]);
-        bindings.push(match platform {
-            Platform::Mac => ("super+period", "editor.spell_suggest"),
-            Platform::Linux => ("alt+period", "editor.spell_suggest"),
-        });
-        bindings.extend(match platform {
-            Platform::Mac => [("super+comma", "settings.open"), ("super+q", "app.quit")],
-            Platform::Linux => [("ctrl+f", "navigation.find"), ("ctrl+q", "app.quit")],
-        });
-        bindings
+    fn user(lines: &[(&str, &str)]) -> Vec<(String, String)> {
+        lines
+            .iter()
+            .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
+            .collect()
     }
 
-    /// The task defaults, frozen as the board layer's are: ⌘D / Ctrl+D sets
-    /// the due date (item 4.1), and ⇧⌘↵ / Ctrl+Shift+Enter opens the task
-    /// form (item 6.1).
+    fn literal(table: &[(&str, &'static str)]) -> Vec<(String, &'static str)> {
+        table
+            .iter()
+            .map(|(trigger, action)| ((*trigger).to_owned(), *action))
+            .collect()
+    }
+
+    /// The macOS base layer as Wren shipped it before Linux had a command
+    /// key, which `mod` must reproduce exactly.
+    const MAC_BASE: &[(&str, &str)] = &[
+        ("super+shift+p", "palette.commands"),
+        ("super+k", "palette.commands"),
+        ("super+p", "navigation.jump"),
+        ("super+shift+f", "navigation.search"),
+        ("super+f", "navigation.find"),
+        ("super+shift+o", "navigation.outline"),
+        ("super+n", "note.new"),
+        ("super+shift+n", "note.new_dated"),
+        ("super+bracketleft", "navigation.back"),
+        ("super+bracketright", "navigation.forward"),
+        ("super+shift+bracketleft", "navigation.column_left"),
+        ("super+shift+bracketright", "navigation.column_right"),
+        ("super+r", "note.rename"),
+        ("super+y", "view.focus"),
+        ("super+shift+y", "view.collapse_columns"),
+        ("super+plus", "font.increase"),
+        ("super+equal", "font.increase"),
+        ("super+shift+equal", "font.increase"),
+        ("super+shift+plus", "font.increase"),
+        ("super+minus", "font.decrease"),
+        ("super+0", "font.reset"),
+        ("super+enter", "markdown.toggle_task"),
+        ("super+b", "markdown.bold"),
+        ("super+i", "markdown.italic"),
+        ("super+e", "markdown.code"),
+        ("alt+up", "edit.move_line_up"),
+        ("alt+down", "edit.move_line_down"),
+        ("super+period", "editor.spell_suggest"),
+        ("super+comma", "settings.open"),
+        ("super+q", "app.quit"),
+    ];
+
+    /// The macOS task defaults as they were.
+    const MAC_TASK: &[(&str, &str)] = &[
+        ("super+d", "task.set_due"),
+        ("super+shift+enter", "task.edit"),
+    ];
+
+    /// The macOS board layer as it was.
+    const MAC_BOARD: &[(&str, &str)] = &[
+        ("v", "board.tool.select"),
+        ("h", "board.tool.hand"),
+        ("r", "board.tool.rectangle"),
+        ("o", "board.tool.ellipse"),
+        ("d", "board.tool.diamond"),
+        ("u", "board.tool.pill"),
+        ("y", "board.tool.cylinder"),
+        ("p", "board.tool.parallelogram"),
+        ("t", "board.tool.text"),
+        ("c", "board.tool.connector"),
+        ("a", "board.tool.connector"),
+        ("shift+r", "board.shape.rectangle"),
+        ("shift+o", "board.shape.ellipse"),
+        ("shift+d", "board.shape.diamond"),
+        ("shift+u", "board.shape.pill"),
+        ("shift+y", "board.shape.cylinder"),
+        ("shift+p", "board.shape.parallelogram"),
+        ("enter", "board.label.edit"),
+        ("f2", "board.label.edit"),
+        ("tab", "board.connect.next"),
+        ("backspace", "board.delete"),
+        ("delete", "board.delete"),
+        ("shift+1", "board.zoom.fit"),
+        ("shift+2", "board.zoom.selection"),
+        ("]", "board.arrange.front"),
+        ("[", "board.arrange.back"),
+        ("shift+]", "board.arrange.forward"),
+        ("shift+[", "board.arrange.backward"),
+        ("0", "board.color.neutral"),
+        ("1", "board.color.red"),
+        ("2", "board.color.orange"),
+        ("3", "board.color.yellow"),
+        ("4", "board.color.green"),
+        ("5", "board.color.cyan"),
+        ("6", "board.color.purple"),
+        ("7", "board.color.blue"),
+        ("/", "board.actions"),
+        ("shift+f10", "board.actions"),
+        ("shift+/", "board.keys"),
+        ("super+left", "board.connect.left"),
+        ("left", "board.select.left"),
+        ("shift+left", "board.select.extend_left"),
+        ("super+shift+left", "board.select.connector_left"),
+        ("alt+left", "board.move.left"),
+        ("super+right", "board.connect.right"),
+        ("right", "board.select.right"),
+        ("shift+right", "board.select.extend_right"),
+        ("super+shift+right", "board.select.connector_right"),
+        ("alt+right", "board.move.right"),
+        ("super+up", "board.connect.up"),
+        ("up", "board.select.up"),
+        ("shift+up", "board.select.extend_up"),
+        ("super+shift+up", "board.select.connector_up"),
+        ("alt+up", "board.move.up"),
+        ("super+down", "board.connect.down"),
+        ("down", "board.select.down"),
+        ("shift+down", "board.select.extend_down"),
+        ("super+shift+down", "board.select.connector_down"),
+        ("alt+down", "board.move.down"),
+        ("alt+shift+right", "board.resize.wider"),
+        ("alt+shift+left", "board.resize.narrower"),
+        ("alt+shift+down", "board.resize.taller"),
+        ("alt+shift+up", "board.resize.shorter"),
+        ("super+enter", "board.label.commit"),
+        ("super+a", "board.select.all"),
+        ("super+shift+a", "board.select.connected"),
+        ("super+d", "board.duplicate"),
+        ("super+c", "board.copy"),
+        ("super+x", "board.cut"),
+        ("super+v", "board.paste"),
+        ("super+z", "board.undo"),
+        ("super+shift+z", "board.redo"),
+    ];
+
+    #[test]
+    fn the_mac_tables_are_unchanged() {
+        assert_eq!(default_bindings(MAC), literal(MAC_BASE));
+        assert_eq!(default_task_bindings(MAC), literal(MAC_TASK));
+        assert_eq!(default_board_bindings(MAC), literal(MAC_BOARD));
+    }
+
+    #[test]
+    fn the_mac_ignores_the_linux_modifier() {
+        let alt = Scheme::new(Platform::Mac, LinuxModifier::Alt);
+        assert_eq!(default_bindings(alt), default_bindings(MAC));
+        assert_eq!(default_task_bindings(alt), default_task_bindings(MAC));
+        assert_eq!(default_board_bindings(alt), default_board_bindings(MAC));
+        assert_eq!(alt.parse("mod+opt+k"), MAC.parse("super+alt+k"));
+    }
+
+    /// Linux's base layer in Ctrl mode: Mod is Ctrl.
+    const CTRL_BASE: &[(&str, &str)] = &[
+        ("ctrl+shift+p", "palette.commands"),
+        ("ctrl+k", "palette.commands"),
+        ("ctrl+p", "navigation.jump"),
+        ("ctrl+shift+f", "navigation.search"),
+        ("ctrl+f", "navigation.find"),
+        ("ctrl+shift+o", "navigation.outline"),
+        ("ctrl+n", "note.new"),
+        ("ctrl+shift+n", "note.new_dated"),
+        ("ctrl+bracketleft", "navigation.back"),
+        ("ctrl+bracketright", "navigation.forward"),
+        ("ctrl+shift+bracketleft", "navigation.column_left"),
+        ("ctrl+shift+bracketright", "navigation.column_right"),
+        ("ctrl+r", "note.rename"),
+        ("ctrl+y", "view.focus"),
+        ("ctrl+shift+y", "view.collapse_columns"),
+        ("ctrl+plus", "font.increase"),
+        ("ctrl+equal", "font.increase"),
+        ("ctrl+shift+equal", "font.increase"),
+        ("ctrl+shift+plus", "font.increase"),
+        ("ctrl+minus", "font.decrease"),
+        ("ctrl+0", "font.reset"),
+        ("ctrl+enter", "markdown.toggle_task"),
+        ("ctrl+b", "markdown.bold"),
+        ("ctrl+i", "markdown.italic"),
+        ("ctrl+e", "markdown.code"),
+        ("alt+up", "edit.move_line_up"),
+        ("alt+down", "edit.move_line_down"),
+        ("alt+period", "editor.spell_suggest"),
+        ("ctrl+comma", "settings.open"),
+        ("ctrl+q", "app.quit"),
+        ("ctrl+z", "edit.undo"),
+        ("ctrl+shift+z", "edit.redo"),
+        ("ctrl+c", "edit.copy"),
+        ("ctrl+x", "edit.cut"),
+        ("ctrl+v", "edit.paste"),
+        ("ctrl+a", "edit.select_all"),
+    ];
+
+    /// Linux's base layer in Alt mode: Mod is Alt, and Ctrl keeps find, quit
+    /// and the editing keys.
+    const ALT_BASE: &[(&str, &str)] = &[
+        ("alt+shift+p", "palette.commands"),
+        ("alt+k", "palette.commands"),
+        ("alt+p", "navigation.jump"),
+        ("alt+shift+f", "navigation.search"),
+        ("alt+f", "navigation.find"),
+        ("alt+shift+o", "navigation.outline"),
+        ("alt+n", "note.new"),
+        ("alt+shift+n", "note.new_dated"),
+        ("alt+bracketleft", "navigation.back"),
+        ("alt+bracketright", "navigation.forward"),
+        ("alt+shift+bracketleft", "navigation.column_left"),
+        ("alt+shift+bracketright", "navigation.column_right"),
+        ("alt+r", "note.rename"),
+        ("alt+y", "view.focus"),
+        ("alt+shift+y", "view.collapse_columns"),
+        ("alt+plus", "font.increase"),
+        ("alt+equal", "font.increase"),
+        ("alt+shift+equal", "font.increase"),
+        ("alt+shift+plus", "font.increase"),
+        ("alt+minus", "font.decrease"),
+        ("alt+0", "font.reset"),
+        ("alt+enter", "markdown.toggle_task"),
+        ("alt+b", "markdown.bold"),
+        ("alt+i", "markdown.italic"),
+        ("alt+e", "markdown.code"),
+        ("alt+up", "edit.move_line_up"),
+        ("alt+down", "edit.move_line_down"),
+        ("alt+period", "editor.spell_suggest"),
+        ("alt+comma", "settings.open"),
+        ("alt+q", "app.quit"),
+        ("alt+z", "edit.undo"),
+        ("alt+shift+z", "edit.redo"),
+        ("alt+c", "edit.copy"),
+        ("alt+x", "edit.cut"),
+        ("alt+v", "edit.paste"),
+        ("alt+a", "edit.select_all"),
+        ("ctrl+f", "navigation.find"),
+        ("ctrl+q", "app.quit"),
+        ("ctrl+z", "edit.undo"),
+        ("ctrl+shift+z", "edit.redo"),
+        ("ctrl+c", "edit.copy"),
+        ("ctrl+x", "edit.cut"),
+        ("ctrl+v", "edit.paste"),
+        ("ctrl+a", "edit.select_all"),
+    ];
+
+    /// Linux's board bindings with a modifier, in Ctrl mode: Mod is Ctrl and
+    /// Opt Alt. The bare keys before them are the Mac's.
+    const CTRL_BOARD: &[(&str, &str)] = &[
+        ("ctrl+left", "board.connect.left"),
+        ("left", "board.select.left"),
+        ("shift+left", "board.select.extend_left"),
+        ("ctrl+shift+left", "board.select.connector_left"),
+        ("alt+left", "board.move.left"),
+        ("ctrl+right", "board.connect.right"),
+        ("right", "board.select.right"),
+        ("shift+right", "board.select.extend_right"),
+        ("ctrl+shift+right", "board.select.connector_right"),
+        ("alt+right", "board.move.right"),
+        ("ctrl+up", "board.connect.up"),
+        ("up", "board.select.up"),
+        ("shift+up", "board.select.extend_up"),
+        ("ctrl+shift+up", "board.select.connector_up"),
+        ("alt+up", "board.move.up"),
+        ("ctrl+down", "board.connect.down"),
+        ("down", "board.select.down"),
+        ("shift+down", "board.select.extend_down"),
+        ("ctrl+shift+down", "board.select.connector_down"),
+        ("alt+down", "board.move.down"),
+        ("alt+shift+right", "board.resize.wider"),
+        ("alt+shift+left", "board.resize.narrower"),
+        ("alt+shift+down", "board.resize.taller"),
+        ("alt+shift+up", "board.resize.shorter"),
+        ("ctrl+enter", "board.label.commit"),
+        ("ctrl+a", "board.select.all"),
+        ("ctrl+shift+a", "board.select.connected"),
+        ("ctrl+d", "board.duplicate"),
+        ("ctrl+c", "board.copy"),
+        ("ctrl+x", "board.cut"),
+        ("ctrl+v", "board.paste"),
+        ("ctrl+z", "board.undo"),
+        ("ctrl+shift+z", "board.redo"),
+    ];
+
+    /// Linux's board bindings with a modifier, in Alt mode: Mod is Alt and Opt
+    /// Ctrl, and Ctrl keeps the editing keys.
+    const ALT_BOARD: &[(&str, &str)] = &[
+        ("alt+left", "board.connect.left"),
+        ("left", "board.select.left"),
+        ("shift+left", "board.select.extend_left"),
+        ("alt+shift+left", "board.select.connector_left"),
+        ("ctrl+left", "board.move.left"),
+        ("alt+right", "board.connect.right"),
+        ("right", "board.select.right"),
+        ("shift+right", "board.select.extend_right"),
+        ("alt+shift+right", "board.select.connector_right"),
+        ("ctrl+right", "board.move.right"),
+        ("alt+up", "board.connect.up"),
+        ("up", "board.select.up"),
+        ("shift+up", "board.select.extend_up"),
+        ("alt+shift+up", "board.select.connector_up"),
+        ("ctrl+up", "board.move.up"),
+        ("alt+down", "board.connect.down"),
+        ("down", "board.select.down"),
+        ("shift+down", "board.select.extend_down"),
+        ("alt+shift+down", "board.select.connector_down"),
+        ("ctrl+down", "board.move.down"),
+        ("ctrl+shift+right", "board.resize.wider"),
+        ("ctrl+shift+left", "board.resize.narrower"),
+        ("ctrl+shift+down", "board.resize.taller"),
+        ("ctrl+shift+up", "board.resize.shorter"),
+        ("alt+enter", "board.label.commit"),
+        ("alt+a", "board.select.all"),
+        ("alt+shift+a", "board.select.connected"),
+        ("alt+d", "board.duplicate"),
+        ("alt+c", "board.copy"),
+        ("alt+x", "board.cut"),
+        ("alt+v", "board.paste"),
+        ("alt+z", "board.undo"),
+        ("alt+shift+z", "board.redo"),
+        ("ctrl+a", "board.select.all"),
+        ("ctrl+c", "board.copy"),
+        ("ctrl+x", "board.cut"),
+        ("ctrl+v", "board.paste"),
+        ("ctrl+z", "board.undo"),
+        ("ctrl+shift+z", "board.redo"),
+    ];
+
+    #[test]
+    fn the_linux_tables_follow_the_mode() {
+        for (scheme, base, task, board) in [
+            (CTRL, CTRL_BASE, ["ctrl+d", "ctrl+shift+enter"], CTRL_BOARD),
+            (ALT, ALT_BASE, ["alt+d", "alt+shift+enter"], ALT_BOARD),
+        ] {
+            assert_eq!(default_bindings(scheme), literal(base), "{scheme:?}");
+            assert_eq!(
+                default_task_bindings(scheme),
+                literal(&[(task[0], "task.set_due"), (task[1], "task.edit")]),
+                "{scheme:?}"
+            );
+            let defaults = default_board_bindings(scheme);
+            let (bare, modified) = defaults.split_at(39);
+            assert_eq!(bare, literal(&MAC_BOARD[..39]), "{scheme:?}");
+            assert_eq!(modified, literal(board), "{scheme:?}");
+        }
+    }
+
+    #[test]
+    fn the_logical_modifiers_follow_the_platform_and_mode() {
+        for (scheme, primary, secondary) in [
+            (MAC, "super", "alt"),
+            (CTRL, "ctrl", "alt"),
+            (ALT, "alt", "ctrl"),
+        ] {
+            assert_eq!(scheme.modifier(Logical::Mod), primary);
+            assert_eq!(scheme.modifier(Logical::Opt), secondary);
+            assert_eq!(
+                scheme.resolve("mod+shift+opt+left"),
+                format!("{primary}+shift+{secondary}+left")
+            );
+        }
+        assert_eq!(Scheme::default().platform, Platform::current());
+        assert_eq!(Scheme::default().linux, LinuxModifier::Ctrl);
+    }
+
+    #[test]
+    fn the_linux_modifier_parses_ctrl_and_alt() {
+        assert_eq!(LinuxModifier::default(), LinuxModifier::Ctrl);
+        for mode in [LinuxModifier::Ctrl, LinuxModifier::Alt] {
+            assert_eq!(LinuxModifier::parse(mode.value()), Some(mode));
+        }
+        assert_eq!(LinuxModifier::parse(" Alt "), Some(LinuxModifier::Alt));
+        for bad in ["", "super", "control", "mod", "ctrl+alt"] {
+            assert_eq!(LinuxModifier::parse(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The task defaults: Mod+D sets the due date (item 4.1), and
+    /// Mod+Shift+Enter opens the task form (item 6.1).
     #[test]
     fn the_task_defaults_are_the_due_date_and_form_keys() {
-        for (platform, trigger, form) in [
-            (Platform::Mac, "super+d", "super+shift+enter"),
-            (Platform::Linux, "ctrl+d", "ctrl+shift+enter"),
+        for (scheme, trigger, form) in [
+            (MAC, "super+d", "super+shift+enter"),
+            (CTRL, "ctrl+d", "ctrl+shift+enter"),
+            (ALT, "alt+d", "alt+shift+enter"),
         ] {
             assert_eq!(
-                default_task_bindings(platform),
+                default_task_bindings(scheme),
                 [
                     (trigger.to_string(), "task.set_due"),
                     (form.to_string(), "task.edit")
                 ],
-                "{platform:?}"
+                "{scheme:?}"
             );
             // Neither layer binds the form's key.
-            let (keymap, _) = Keymap::build(both_defaults(platform), &[], by_name);
-            assert_eq!(keymap.action(&accel(form)), None, "{platform:?}");
-            assert_eq!(keymap.board_action(&accel(form)), None, "{platform:?}");
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
+            assert_eq!(keymap.action(&accel(form)), None, "{scheme:?}");
+            assert_eq!(keymap.board_action(&accel(form)), None, "{scheme:?}");
             // The base layer has no due date trigger, and the board layer's
             // is `board.duplicate`, read only by a focused board.
-            assert_eq!(keymap.action(&accel(trigger)), None, "{platform:?}");
+            assert_eq!(keymap.action(&accel(trigger)), None, "{scheme:?}");
             assert_eq!(
                 keymap.board_action(&accel(trigger)),
                 Some("board.duplicate"),
-                "{platform:?}"
+                "{scheme:?}"
             );
         }
     }
@@ -713,8 +1196,68 @@ mod tests {
             "ctrl++",
             "f25",
             "super+tabby",
+            // Without a scheme `mod` stands for nothing.
+            "mod+k",
         ] {
             assert_eq!(parse_trigger(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn mod_and_opt_parse_as_the_schemes_modifiers() {
+        for (scheme, primary, secondary) in [
+            (MAC, "super", "alt"),
+            (CTRL, "ctrl", "alt"),
+            (ALT, "alt", "ctrl"),
+        ] {
+            assert_eq!(
+                scheme.parse("Mod+Shift+K"),
+                Some(accel(&format!("{primary}+shift+k")))
+            );
+            assert_eq!(
+                scheme.parse("opt+left"),
+                Some(accel(&format!("{secondary}+left")))
+            );
+            assert_eq!(
+                scheme.parse("mod+opt+1"),
+                Some(accel(&format!("{primary}+{secondary}+1")))
+            );
+            // Literal modifiers stay as written; `option` is always Alt.
+            assert_eq!(scheme.parse("ctrl+k"), Some(accel("ctrl+k")));
+            assert_eq!(scheme.parse("option+k"), Some(accel("alt+k")));
+            assert!(scheme.is_mod(&scheme.parse("mod+shift+k").unwrap()));
+            assert!(!scheme.is_mod(&scheme.parse("opt+k").unwrap()));
+            assert!(!scheme.is_mod(&scheme.parse("mod+opt+k").unwrap()));
+            for invalid in ["mod", "mod+", "mod+opt", "mod+k+j"] {
+                assert_eq!(scheme.parse(invalid), None, "{invalid:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mod_keybind_line_follows_the_switch() {
+        let lines = user(&[
+            ("mod+shift+k", "note.new"),
+            ("opt+shift+left", "board.connect.left"),
+            ("mod+n", "unbind"),
+        ]);
+        for (scheme, new, connect) in [
+            (MAC, "super+shift+k", "alt+shift+left"),
+            (CTRL, "ctrl+shift+k", "alt+shift+left"),
+            (ALT, "alt+shift+k", "ctrl+shift+left"),
+        ] {
+            let (keymap, warnings) = Keymap::build(scheme, both_defaults(scheme), &lines, by_name);
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(keymap.scheme(), scheme);
+            assert_eq!(keymap.accel("note.new"), Some(&accel(new)), "{scheme:?}");
+            assert_eq!(
+                keymap.board_action(&accel(connect)),
+                Some("board.connect.left"),
+                "{scheme:?}"
+            );
+            // `mod+n` unbinds the mode's own default.
+            let n = scheme.parse("mod+n").unwrap();
+            assert_eq!(keymap.action(&n), None, "{scheme:?}");
         }
     }
 
@@ -734,6 +1277,41 @@ mod tests {
     }
 
     #[test]
+    fn default_labels_follow_the_mode() {
+        for (scheme, palette, undo, quit, connect, step, suggest) in [
+            (MAC, "⇧⌘P", None, "⌘Q", "⌘→", "⌥→", "⌘."),
+            (
+                CTRL,
+                "Ctrl+Shift+P",
+                Some("Ctrl+Z"),
+                "Ctrl+Q",
+                "Ctrl+→",
+                "Alt+→",
+                "Alt+.",
+            ),
+            (
+                ALT,
+                "Alt+Shift+P",
+                Some("Alt+Z"),
+                "Alt+Q",
+                "Alt+→",
+                "Ctrl+→",
+                "Alt+.",
+            ),
+        ] {
+            let platform = scheme.platform;
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
+            let label = |action| keymap.label(action, platform);
+            assert_eq!(label("palette.commands").as_deref(), Some(palette));
+            assert_eq!(label("edit.undo").as_deref(), undo);
+            assert_eq!(label("app.quit").as_deref(), Some(quit));
+            assert_eq!(label("board.connect.right").as_deref(), Some(connect));
+            assert_eq!(label("board.move.right").as_deref(), Some(step));
+            assert_eq!(label("editor.spell_suggest").as_deref(), Some(suggest));
+        }
+    }
+
+    #[test]
     fn shift_slash_is_shown_as_the_question_mark_it_types() {
         for platform in [Platform::Mac, Platform::Linux] {
             assert_eq!(accel("shift+/").label(platform), "?");
@@ -745,12 +1323,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_defaults_are_command_shift_p_on_mac_and_alt_shift_p_on_linux() {
-        for (platform, trigger) in [
-            (Platform::Mac, "super+shift+p"),
-            (Platform::Linux, "alt+shift+p"),
+    fn the_palette_is_mod_shift_p() {
+        for (scheme, trigger) in [
+            (MAC, "super+shift+p"),
+            (CTRL, "ctrl+shift+p"),
+            (ALT, "alt+shift+p"),
         ] {
-            let (keymap, warnings) = Keymap::build(default_bindings(platform), &[], base);
+            let (keymap, warnings) = Keymap::build(scheme, default_bindings(scheme), &[], base);
             assert!(warnings.is_empty());
             assert_eq!(keymap.action(&accel(trigger)), Some("palette.commands"));
             assert_eq!(keymap.accel("palette.commands"), Some(&accel(trigger)));
@@ -758,9 +1337,9 @@ mod tests {
     }
 
     #[test]
-    fn editor_commands_use_command_on_mac_and_ctrl_on_linux() {
-        for (platform, modifier) in [(Platform::Mac, "super"), (Platform::Linux, "ctrl")] {
-            let (keymap, _) = Keymap::build(default_bindings(platform), &[], base);
+    fn editor_commands_use_mod_and_move_line_alt() {
+        for scheme in SCHEMES {
+            let (keymap, _) = Keymap::build(scheme, default_bindings(scheme), &[], base);
             for (key, action) in [
                 ("enter", "markdown.toggle_task"),
                 ("b", "markdown.bold"),
@@ -768,8 +1347,9 @@ mod tests {
                 ("e", "markdown.code"),
             ] {
                 assert_eq!(
-                    keymap.action(&accel(&format!("{modifier}+{key}"))),
-                    Some(action)
+                    keymap.action(&scheme.parse(&format!("mod+{key}")).unwrap()),
+                    Some(action),
+                    "{scheme:?}"
                 );
             }
             assert_eq!(keymap.action(&accel("alt+up")), Some("edit.move_line_up"));
@@ -780,45 +1360,193 @@ mod tests {
         }
     }
 
+    /// Exception: Ctrl+., the usual "quick fix" key, is IBus's emoji key on
+    /// GNOME, so in Ctrl mode suggest is Alt+.; everywhere else it is Mod+.
     #[test]
-    fn the_suggest_key_is_alt_period_on_linux_and_command_period_on_mac() {
-        for (platform, trigger, label) in [
-            (Platform::Linux, "alt+.", "Alt+."),
-            (Platform::Mac, "super+period", "⌘."),
+    fn the_suggest_key_is_mod_period_but_alt_period_in_ctrl_mode() {
+        for (scheme, trigger, label) in [
+            (MAC, "super+period", "⌘."),
+            (CTRL, "alt+.", "Alt+."),
+            (ALT, "alt+.", "Alt+."),
         ] {
-            let (keymap, _) = Keymap::build(default_bindings(platform), &[], base);
+            let (keymap, _) = Keymap::build(scheme, default_bindings(scheme), &[], base);
             assert_eq!(keymap.action(&accel(trigger)), Some("editor.spell_suggest"));
             assert_eq!(
-                keymap.label("editor.spell_suggest", platform).as_deref(),
+                keymap
+                    .label("editor.spell_suggest", scheme.platform)
+                    .as_deref(),
                 Some(label)
             );
         }
+        let (keymap, _) = Keymap::build(CTRL, default_bindings(CTRL), &[], base);
+        assert_eq!(keymap.action(&accel("ctrl+period")), None);
     }
 
+    /// Exception: in Alt mode, Ctrl+F and Ctrl+Q find and quit too, after
+    /// Alt+F and Alt+Q, which menus show.
     #[test]
-    fn defaults_bind_each_trigger_once() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            let defaults = default_bindings(platform);
-            let mut seen = std::collections::HashSet::new();
-            for (trigger, _) in &defaults {
-                assert!(seen.insert(accel(trigger)), "{trigger} bound twice");
+    fn alt_mode_also_finds_and_quits_on_ctrl() {
+        let (keymap, _) = Keymap::build(ALT, default_bindings(ALT), &[], base);
+        for (key, action) in [("f", "navigation.find"), ("q", "app.quit")] {
+            assert_eq!(keymap.action(&accel(&format!("ctrl+{key}"))), Some(action));
+            assert_eq!(keymap.accel(action), Some(&accel(&format!("alt+{key}"))));
+        }
+        let (keymap, _) = Keymap::build(CTRL, default_bindings(CTRL), &[], base);
+        assert_eq!(keymap.action(&accel("alt+f")), None);
+        assert_eq!(keymap.action(&accel("alt+q")), None);
+    }
+
+    /// Exception: in Alt mode the editing keys of every other text field,
+    /// Ctrl+Z, Ctrl+Shift+Z, Ctrl+C, Ctrl+X, Ctrl+V and Ctrl+A, keep working
+    /// beside Mod's; in Ctrl mode they are Mod's. The Mac has no `edit.*`
+    /// default: the editor and the Edit menu own ⌘Z and the rest there.
+    #[test]
+    fn the_edit_actions_are_mod_on_linux_with_ctrl_aliases_in_alt_mode() {
+        let edits = [
+            ("z", "edit.undo"),
+            ("shift+z", "edit.redo"),
+            ("c", "edit.copy"),
+            ("x", "edit.cut"),
+            ("v", "edit.paste"),
+            ("a", "edit.select_all"),
+        ];
+        for scheme in [CTRL, ALT] {
+            let (keymap, _) = Keymap::build(scheme, default_bindings(scheme), &[], base);
+            for (key, action) in edits {
+                let primary = scheme.parse(&format!("mod+{key}")).unwrap();
+                assert_eq!(keymap.action(&primary), Some(action), "{scheme:?}");
+                assert_eq!(keymap.accel(action), Some(&primary), "{scheme:?}");
+                let ctrl = accel(&format!("ctrl+{key}"));
+                assert_eq!(keymap.action(&ctrl), Some(action), "{scheme:?}");
+                // Ctrl mode binds none of them on Alt.
+                let alt = accel(&format!("alt+{key}"));
+                assert_eq!(
+                    keymap.action(&alt),
+                    (scheme == ALT).then_some(action),
+                    "{scheme:?}"
+                );
             }
+        }
+        assert!(default_bindings(MAC)
+            .iter()
+            .all(|(_, action)| !EDIT_KEYS.iter().any(|(_, edit)| edit == action)));
+        // Redo is Mod+Shift+Z only, so Ctrl+Y is free for Focus in Ctrl mode.
+        let (keymap, _) = Keymap::build(CTRL, both_defaults(CTRL), &[], by_name);
+        assert_eq!(keymap.action(&accel("ctrl+y")), Some("view.focus"));
+        assert_eq!(keymap.board_action(&accel("ctrl+y")), None);
+    }
+
+    /// Exception, the board's: in Alt mode its select all, copy, cut, paste,
+    /// undo and redo keep their Ctrl keys beside Mod's.
+    #[test]
+    fn alt_mode_boards_keep_the_ctrl_editing_keys() {
+        let (keymap, _) = Keymap::build(ALT, both_defaults(ALT), &[], by_name);
+        for (key, action) in [
+            ("a", "board.select.all"),
+            ("c", "board.copy"),
+            ("x", "board.cut"),
+            ("v", "board.paste"),
+            ("z", "board.undo"),
+            ("shift+z", "board.redo"),
+        ] {
+            assert_eq!(
+                keymap.board_action(&accel(&format!("alt+{key}"))),
+                Some(action)
+            );
+            assert_eq!(
+                keymap.board_action(&accel(&format!("ctrl+{key}"))),
+                Some(action)
+            );
+            assert_eq!(keymap.accel(action), Some(&accel(&format!("alt+{key}"))));
+        }
+        for scheme in [MAC, CTRL] {
+            let defaults = default_board_bindings(scheme);
+            let ctrl = defaults.iter().filter(|(trigger, _)| {
+                let accel = accel(trigger);
+                accel.mods.ctrl && !scheme.is_mod(&accel)
+            });
+            assert_eq!(ctrl.count(), 0, "{scheme:?}");
+        }
+    }
+
+    /// Every default trigger is bound at most once in its layer: the base
+    /// layer with the task defaults, which join it, and the board layer.
+    #[test]
+    fn every_trigger_is_bound_once_per_layer_and_scheme() {
+        for scheme in SCHEMES {
+            for (layer, table) in [
+                (
+                    Layer::Base,
+                    default_bindings(scheme)
+                        .into_iter()
+                        .chain(default_task_bindings(scheme))
+                        .collect::<Vec<_>>(),
+                ),
+                (Layer::Board, default_board_bindings(scheme)),
+            ] {
+                let mut seen = HashSet::new();
+                for (trigger, action) in table {
+                    assert!(
+                        seen.insert(accel(&trigger)),
+                        "{scheme:?} {layer:?}: {trigger} bound twice"
+                    );
+                    assert_eq!(
+                        action.starts_with("board."),
+                        layer == Layer::Board,
+                        "{scheme:?}: {trigger} → {action}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every base-layer and task default is on Mod alone (with or without
+    /// Shift), but for the exceptions, each tested above: move line, Alt+.
+    /// in Ctrl mode, and Alt mode's Ctrl keys.
+    #[test]
+    fn every_base_default_uses_mod_but_the_exceptions() {
+        for scheme in SCHEMES {
+            let exceptions: Vec<&str> = match (scheme.platform, scheme.linux) {
+                (Platform::Mac, _) => vec!["alt+up", "alt+down"],
+                (Platform::Linux, LinuxModifier::Ctrl) => {
+                    vec!["alt+up", "alt+down", "alt+period"]
+                }
+                (Platform::Linux, LinuxModifier::Alt) => vec![
+                    "ctrl+f",
+                    "ctrl+q",
+                    "ctrl+z",
+                    "ctrl+shift+z",
+                    "ctrl+c",
+                    "ctrl+x",
+                    "ctrl+v",
+                    "ctrl+a",
+                ],
+            };
+            let mut found = Vec::new();
+            for (trigger, _) in default_bindings(scheme)
+                .into_iter()
+                .chain(default_task_bindings(scheme))
+            {
+                if !scheme.is_mod(&accel(&trigger)) {
+                    found.push(trigger);
+                }
+            }
+            assert_eq!(found, exceptions, "{scheme:?}");
         }
     }
 
     #[test]
     fn user_bindings_override_unbind_and_warn() {
-        let user = [
-            ("alt+shift+p".to_string(), "unbind".to_string()),
-            ("ctrl+shift+p".to_string(), "palette.commands".to_string()),
-            ("alt+p".to_string(), "view.focus".to_string()),
-            ("alt+x".to_string(), "no.such".to_string()),
-            ("alt+".to_string(), "view.focus".to_string()),
-        ];
-        let (keymap, warnings) =
-            Keymap::build(default_bindings(Platform::Linux), &user, |action| {
-                (action != "no.such").then_some(Layer::Base)
-            });
+        let user = user(&[
+            ("alt+shift+p", "unbind"),
+            ("ctrl+shift+p", "palette.commands"),
+            ("alt+p", "view.focus"),
+            ("alt+x", "no.such"),
+            ("alt+", "view.focus"),
+        ]);
+        let (keymap, warnings) = Keymap::build(ALT, default_bindings(ALT), &user, |action| {
+            (action != "no.such").then_some(Layer::Base)
+        });
         assert_eq!(keymap.action(&accel("alt+shift+p")), None);
         assert_eq!(
             keymap.accel("palette.commands"),
@@ -834,13 +1562,13 @@ mod tests {
 
     #[test]
     fn bare_keys_other_than_function_keys_are_rejected() {
-        let user = [
-            ("f5".to_string(), "settings.reload".to_string()),
-            ("shift+f13".to_string(), "view.focus".to_string()),
-            ("shift+enter".to_string(), "view.focus".to_string()),
-            ("p".to_string(), "navigation.jump".to_string()),
-        ];
-        let (keymap, warnings) = Keymap::build(Vec::new(), &user, base);
+        let user = user(&[
+            ("f5", "settings.reload"),
+            ("shift+f13", "view.focus"),
+            ("shift+enter", "view.focus"),
+            ("p", "navigation.jump"),
+        ]);
+        let (keymap, warnings) = Keymap::build(CTRL, Vec::new(), &user, base);
         assert_eq!(keymap.action(&accel("f5")), Some("settings.reload"));
         assert_eq!(keymap.action(&accel("shift+f13")), Some("view.focus"));
         assert_eq!(keymap.action(&accel("shift+enter")), None);
@@ -848,36 +1576,33 @@ mod tests {
     }
 
     #[test]
-    fn the_base_layer_equals_the_0_1_1_defaults_with_the_board_layer_present() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            let (keymap, warnings) = Keymap::build(both_defaults(platform), &[], by_name);
+    fn the_keymap_holds_each_layers_defaults_in_order() {
+        for scheme in SCHEMES {
+            let (keymap, warnings) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
             assert!(warnings.is_empty(), "{warnings:?}");
-            let frozen: Vec<(Accel, &str)> = frozen_base(platform)
-                .into_iter()
-                .map(|(trigger, action)| (accel(trigger), action))
-                .collect();
+            let expect = |table: Vec<(String, &'static str)>| -> Vec<(Accel, &'static str)> {
+                table
+                    .into_iter()
+                    .map(|(trigger, action)| (accel(&trigger), action))
+                    .collect()
+            };
             let base: Vec<(Accel, &str)> = keymap
                 .bindings()
                 .map(|(accel, action)| (accel.clone(), action))
                 .collect();
-            assert_eq!(base, frozen, "{platform:?}");
+            assert_eq!(base, expect(default_bindings(scheme)), "{scheme:?}");
             let board: Vec<(Accel, &str)> = keymap
                 .board_bindings()
                 .map(|(accel, action)| (accel.clone(), action))
                 .collect();
-            let defaults: Vec<(Accel, &str)> = default_board_bindings(platform)
-                .into_iter()
-                .map(|(trigger, action)| (accel(&trigger), action))
-                .collect();
-            assert_eq!(board, defaults, "{platform:?}");
+            assert_eq!(board, expect(default_board_bindings(scheme)), "{scheme:?}");
             // Ten of the 64 Phase 2 commands have no default key: the two
             // unlettered tools and reshapes, `board.select.none`, and the
             // five connector style commands. Twelve of the 25 of Phase 3
             // have none: align, distribute, fill and `board.jump`. The
             // keys sheet has `?`.
-            let actions: std::collections::HashSet<&str> =
-                board.iter().map(|(_, action)| *action).collect();
-            assert_eq!(actions.len(), 54 + 13 + 1, "{platform:?}");
+            let actions: HashSet<&str> = board.iter().map(|(_, action)| *action).collect();
+            assert_eq!(actions.len(), 54 + 13 + 1, "{scheme:?}");
         }
     }
 
@@ -886,68 +1611,58 @@ mod tests {
         // The base layer wins a shared trigger, so a board default may only
         // reuse one whose base command is inert on a board: an editor
         // command, run only while the text editor has the keyboard.
-        for platform in [Platform::Mac, Platform::Linux] {
-            let (keymap, _) = Keymap::build(default_bindings(platform), &[], base);
-            let shared: std::collections::HashSet<&str> = default_board_bindings(platform)
+        let editor = [
+            "markdown.toggle_task",
+            "edit.move_line_up",
+            "edit.move_line_down",
+        ];
+        let edits = EDIT_KEYS.map(|(_, action)| action);
+        for scheme in SCHEMES {
+            let (keymap, _) = Keymap::build(scheme, default_bindings(scheme), &[], base);
+            let shared: HashSet<&str> = default_board_bindings(scheme)
                 .iter()
                 .filter_map(|(trigger, _)| keymap.action(&accel(trigger)))
                 .collect();
-            assert_eq!(
-                shared,
-                [
-                    "markdown.toggle_task",
-                    "edit.move_line_up",
-                    "edit.move_line_down"
-                ]
-                .into(),
-                "{platform:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn board_defaults_bind_each_trigger_once_and_only_board_actions() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            let mut seen = std::collections::HashSet::new();
-            for (trigger, action) in default_board_bindings(platform) {
-                assert!(seen.insert(accel(&trigger)), "{trigger} bound twice");
-                assert!(action.starts_with("board."), "{trigger} → {action}");
+            let mut expected: HashSet<&str> = editor.into();
+            if scheme.platform == Platform::Linux {
+                expected.extend(edits);
             }
+            assert_eq!(shared, expected, "{scheme:?}");
         }
     }
 
     #[test]
-    fn board_defaults_follow_the_platform_modifier() {
-        for (platform, m) in [(Platform::Mac, "super"), (Platform::Linux, "ctrl")] {
-            let (keymap, _) = Keymap::build(both_defaults(platform), &[], by_name);
+    fn board_defaults_follow_mod_and_opt() {
+        for scheme in SCHEMES {
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
             for (trigger, action) in [
-                ("v".to_string(), "board.tool.select"),
-                ("shift+r".to_string(), "board.shape.rectangle"),
-                ("tab".to_string(), "board.connect.next"),
-                ("left".to_string(), "board.select.left"),
-                ("shift+up".to_string(), "board.select.extend_up"),
-                ("alt+down".to_string(), "board.move.down"),
-                ("alt+shift+right".to_string(), "board.resize.wider"),
-                ("shift+1".to_string(), "board.zoom.fit"),
-                ("backspace".to_string(), "board.delete"),
-                ("delete".to_string(), "board.delete"),
-                (format!("{m}+enter"), "board.label.commit"),
-                (format!("{m}+right"), "board.connect.right"),
-                (format!("{m}+shift+down"), "board.select.connector_down"),
-                (format!("{m}+z"), "board.undo"),
-                (format!("{m}+shift+z"), "board.redo"),
-                ("]".to_string(), "board.arrange.front"),
-                ("shift+[".to_string(), "board.arrange.backward"),
-                ("0".to_string(), "board.color.neutral"),
-                ("7".to_string(), "board.color.blue"),
-                ("/".to_string(), "board.actions"),
-                ("shift+f10".to_string(), "board.actions"),
-                ("shift+/".to_string(), "board.keys"),
+                ("v", "board.tool.select"),
+                ("shift+r", "board.shape.rectangle"),
+                ("tab", "board.connect.next"),
+                ("left", "board.select.left"),
+                ("shift+up", "board.select.extend_up"),
+                ("opt+down", "board.move.down"),
+                ("opt+shift+right", "board.resize.wider"),
+                ("shift+1", "board.zoom.fit"),
+                ("backspace", "board.delete"),
+                ("delete", "board.delete"),
+                ("mod+enter", "board.label.commit"),
+                ("mod+right", "board.connect.right"),
+                ("mod+shift+down", "board.select.connector_down"),
+                ("mod+z", "board.undo"),
+                ("mod+shift+z", "board.redo"),
+                ("]", "board.arrange.front"),
+                ("shift+[", "board.arrange.backward"),
+                ("0", "board.color.neutral"),
+                ("7", "board.color.blue"),
+                ("/", "board.actions"),
+                ("shift+f10", "board.actions"),
+                ("shift+/", "board.keys"),
             ] {
                 assert_eq!(
-                    keymap.board_action(&accel(&trigger)),
+                    keymap.board_action(&scheme.parse(trigger).unwrap()),
                     Some(action),
-                    "{trigger}"
+                    "{scheme:?} {trigger}"
                 );
             }
             assert_eq!(keymap.accel("board.tool.connector"), Some(&accel("c")));
@@ -958,62 +1673,60 @@ mod tests {
             assert_eq!(keymap.accel("board.label.edit"), Some(&accel("enter")));
             assert_eq!(
                 keymap.accel("board.redo"),
-                Some(&accel(&format!("{m}+shift+z")))
+                scheme.parse("mod+shift+z").as_ref()
             );
-            // ⌘Y stays Focus mode on macOS; Linux adds the common Ctrl+Y.
-            let ctrl_y = keymap.board_action(&accel("ctrl+y"));
-            assert_eq!(
-                ctrl_y,
-                (platform == Platform::Linux).then_some("board.redo")
-            );
+            // Redo is Mod+Shift+Z alone: Ctrl+Y redoes on no board.
+            assert_eq!(keymap.board_action(&accel("ctrl+y")), None, "{scheme:?}");
         }
     }
 
     #[test]
     fn a_binding_replaces_only_within_its_layer() {
-        let user = [
-            ("alt+up".to_string(), "board.move.down".to_string()),
-            ("x".to_string(), "board.delete".to_string()),
-            ("x".to_string(), "note.new".to_string()),
-            ("ctrl+alt+d".to_string(), "board.duplicate".to_string()),
-        ];
-        let (keymap, warnings) = Keymap::build(both_defaults(Platform::Linux), &user, by_name);
-        assert_eq!(keymap.action(&accel("alt+up")), Some("edit.move_line_up"));
-        assert_eq!(
-            keymap.board_action(&accel("alt+up")),
-            Some("board.move.down")
-        );
-        // A bare key is legal in the board layer and still warns in the base.
-        assert_eq!(keymap.board_action(&accel("x")), Some("board.delete"));
-        assert_eq!(keymap.action(&accel("x")), None);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("needs ctrl"), "{warnings:?}");
-        // A user binding takes display priority within its layer.
-        assert_eq!(keymap.accel("board.delete"), Some(&accel("x")));
-        assert_eq!(keymap.accel("board.duplicate"), Some(&accel("ctrl+alt+d")));
-        assert_eq!(
-            keymap.board_action(&accel("ctrl+d")),
-            Some("board.duplicate")
-        );
-        assert_eq!(
-            keymap.label("board.delete", Platform::Linux).as_deref(),
-            Some("X")
-        );
-        assert_eq!(
-            keymap.label("note.new", Platform::Linux).as_deref(),
-            Some("Alt+N")
-        );
+        let user = user(&[
+            ("alt+up", "board.move.down"),
+            ("x", "board.delete"),
+            ("x", "note.new"),
+            ("ctrl+alt+d", "board.duplicate"),
+        ]);
+        for (scheme, duplicate, new) in [(CTRL, "ctrl+d", "Ctrl+N"), (ALT, "alt+d", "Alt+N")] {
+            let (keymap, warnings) = Keymap::build(scheme, both_defaults(scheme), &user, by_name);
+            assert_eq!(keymap.action(&accel("alt+up")), Some("edit.move_line_up"));
+            assert_eq!(
+                keymap.board_action(&accel("alt+up")),
+                Some("board.move.down")
+            );
+            // A bare key is legal in the board layer and still warns in the base.
+            assert_eq!(keymap.board_action(&accel("x")), Some("board.delete"));
+            assert_eq!(keymap.action(&accel("x")), None);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("needs ctrl"), "{warnings:?}");
+            // A user binding takes display priority within its layer.
+            assert_eq!(keymap.accel("board.delete"), Some(&accel("x")));
+            assert_eq!(keymap.accel("board.duplicate"), Some(&accel("ctrl+alt+d")));
+            assert_eq!(
+                keymap.board_action(&accel(duplicate)),
+                Some("board.duplicate")
+            );
+            assert_eq!(
+                keymap.label("board.delete", Platform::Linux).as_deref(),
+                Some("X")
+            );
+            assert_eq!(
+                keymap.label("note.new", Platform::Linux).as_deref(),
+                Some(new)
+            );
+        }
     }
 
     #[test]
     fn unbind_clears_the_base_layer_and_board_unbind_the_board_layer() {
-        let user = [
-            ("alt+down".to_string(), "unbind".to_string()),
-            ("ctrl+enter".to_string(), "board.unbind".to_string()),
-            ("tab".to_string(), "board.unbind".to_string()),
-            ("tab".to_string(), "unbind".to_string()),
-        ];
-        let (keymap, warnings) = Keymap::build(both_defaults(Platform::Linux), &user, by_name);
+        let user = user(&[
+            ("alt+down", "unbind"),
+            ("ctrl+enter", "board.unbind"),
+            ("tab", "board.unbind"),
+            ("tab", "unbind"),
+        ]);
+        let (keymap, warnings) = Keymap::build(CTRL, both_defaults(CTRL), &user, by_name);
         assert_eq!(keymap.action(&accel("alt+down")), None);
         assert_eq!(
             keymap.board_action(&accel("alt+down")),
@@ -1033,8 +1746,31 @@ mod tests {
     }
 
     #[test]
+    fn the_keymap_records_the_base_triggers_a_line_unbinds() {
+        let user = user(&[
+            ("mod+v", "unbind"),
+            ("mod+c", "unbind"),
+            ("mod+c", "edit.copy"),
+            ("mod+x", "board.unbind"),
+            ("tab", "unbind"),
+        ]);
+        for scheme in SCHEMES {
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &user, by_name);
+            // A later line binds Mod+C again; `board.unbind` and a line
+            // that warns record nothing.
+            assert_eq!(
+                keymap.unbound(),
+                [scheme.parse("mod+v").unwrap()],
+                "{scheme:?}"
+            );
+        }
+        let (keymap, _) = Keymap::build(CTRL, both_defaults(CTRL), &[], by_name);
+        assert!(keymap.unbound().is_empty());
+    }
+
+    #[test]
     fn the_base_readers_never_see_the_board_layer() {
-        let (keymap, _) = Keymap::build(both_defaults(Platform::Mac), &[], by_name);
+        let (keymap, _) = Keymap::build(MAC, both_defaults(MAC), &[], by_name);
         assert!(keymap
             .bindings()
             .all(|(_, action)| !action.starts_with("board.")));
@@ -1049,8 +1785,8 @@ mod tests {
     #[test]
     fn an_unknown_default_is_skipped_and_an_unknown_user_action_warns() {
         let only_base = |action: &str| (!action.starts_with("board.")).then_some(Layer::Base);
-        let user = [("alt+x".to_string(), "board.delete".to_string())];
-        let (keymap, warnings) = Keymap::build(both_defaults(Platform::Linux), &user, only_base);
+        let user = user(&[("alt+x", "board.delete")]);
+        let (keymap, warnings) = Keymap::build(ALT, both_defaults(ALT), &user, only_base);
         assert_eq!(keymap.board_bindings().count(), 0);
         assert_eq!(keymap.action(&accel("alt+n")), Some("note.new"));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1060,12 +1796,9 @@ mod tests {
     #[test]
     fn a_bare_key_with_an_unknown_action_still_needs_a_modifier() {
         // 0.1.1 checked the trigger before the action; keep its warning.
-        let user = [
-            ("x".to_string(), "no.such".to_string()),
-            ("alt+x".to_string(), "no.such".to_string()),
-        ];
+        let user = user(&[("x", "no.such"), ("alt+x", "no.such")]);
         let known = |action: &str| by_name(action).filter(|_| action != "no.such");
-        let (_, warnings) = Keymap::build(both_defaults(Platform::Linux), &user, known);
+        let (_, warnings) = Keymap::build(CTRL, both_defaults(CTRL), &user, known);
         assert_eq!(
             warnings,
             [
@@ -1077,7 +1810,7 @@ mod tests {
 
     #[test]
     fn retain_board_drops_only_board_bindings() {
-        let (mut keymap, _) = Keymap::build(both_defaults(Platform::Linux), &[], by_name);
+        let (mut keymap, _) = Keymap::build(CTRL, both_defaults(CTRL), &[], by_name);
         let base: Vec<_> = keymap
             .bindings()
             .map(|(accel, action)| (accel.clone(), action.to_owned()))

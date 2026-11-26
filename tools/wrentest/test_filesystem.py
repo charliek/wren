@@ -13,7 +13,7 @@ import pytest
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture, focus_native, xdo
 from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 from tools.wrentest.x11 import request_close
 
 
@@ -277,7 +277,7 @@ def test_native_committed_creation_is_not_replayed_after_metadata_error(tmp_path
         metadata = root / ".wren"
         try:
             metadata.chmod(0o500)
-            xdo("key", "--window", window, "--clearmodifiers", "alt+shift+p")
+            xdo("key", "--window", window, "--clearmodifiers", native_mod("shift+p"))
             wait_for(lambda: app.client.call("navigation.get")["modal"] is not None,
                      description="native command palette opens")
             xdo("type", "--window", window, "--clearmodifiers", "--delay", "8", "New section")
@@ -296,7 +296,7 @@ def test_native_committed_creation_is_not_replayed_after_metadata_error(tmp_path
                            if entry["path"] == "Created")
             assert app.client.call("navigation.get")["selected_section"] == created
             # The palette opens only once the naming dialog has gone.
-            xdo("key", "--window", window, "--clearmodifiers", "Return", "alt+shift+p")
+            xdo("key", "--window", window, "--clearmodifiers", "Return", native_mod("shift+p"))
             wait_for(lambda: app.client.call("navigation.get")["modal"] is not None,
                      description="creation modal dismissed despite metadata error")
             xdo("key", "--window", window, "--clearmodifiers", "Escape")

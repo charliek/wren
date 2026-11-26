@@ -21,7 +21,7 @@ import pytest
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import capture
 from tools.wrentest.test_setup import BACKGROUNDS, artifact_directory, editor_column
-from tools.wrentest.ui import WrenApp, spell_setting, wait_for
+from tools.wrentest.ui import WrenApp, mod_label, spell_setting, wait_for
 
 
 COMMANDS = {
@@ -40,7 +40,7 @@ COMMANDS = {
     "edit.move_line_up", "edit.move_line_down",
     "editor.toggle_markdown_assist", "editor.toggle_engine",
     "editor.toggle_spell_check", "editor.spell_suggest", "settings.open_words",
-}
+} | ({"keys.toggle_linux_modifier"} if os.uname().sysname != "Darwin" else set())
 # The commands outside a board that exist only with the `boards` setting on
 # (plan §5.19; the `board.*` commands are listed only on a board), each with
 # where it is enabled: "board" only on a board's surface, "group" wherever a
@@ -423,8 +423,8 @@ def test_dated_creation_and_shortcut_metadata_handle_filename_collisions(vault: 
             assert shortcuts["note.new"] == "⌘N"
             assert shortcuts["note.new_dated"] == "⇧⌘N"
         else:
-            assert shortcuts["note.new"] == "Alt+N"
-            assert shortcuts["note.new_dated"] == "Alt+Shift+N"
+            assert shortcuts["note.new"] == f"{mod_label()}N"
+            assert shortcuts["note.new_dated"] == f"{mod_label()}Shift+N"
         nonempty = [value for value in shortcuts.values() if value]
         assert len(nonempty) == len(set(nonempty))
         activate(app, {"command": "note.new_dated"})
@@ -1018,7 +1018,7 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
             "settings.open", "settings.reload", "app.quit",
             "editor.toggle_markdown_assist", "editor.toggle_engine",
             "editor.toggle_spell_check", "settings.open_words",
-        }
+        } | ({"keys.toggle_linux_modifier"} if os.uname().sysname != "Darwin" else set())
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")
         add_workspace(app, alias, "Southern laboratory")

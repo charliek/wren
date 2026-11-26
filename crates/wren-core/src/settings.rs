@@ -11,6 +11,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+pub use crate::keybind::LinuxModifier;
+
 pub const FILE_NAME: &str = "config.conf";
 /// The user's spelling word list, beside the settings file.
 pub const WORDS_FILE_NAME: &str = "words.txt";
@@ -181,6 +183,9 @@ pub struct Settings {
     pub tasks_suggest: bool,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
+    /// Linux's command key, the `mod` of the keymap. Parsed everywhere and
+    /// read on Linux only.
+    pub linux_modifier: LinuxModifier,
     /// `(trigger, action)` in file order; later lines win.
     pub keybinds: Vec<(String, String)>,
     pub warnings: Vec<String>,
@@ -204,6 +209,7 @@ impl Default for Settings {
             board_key_badges: KeyBadges::Hold,
             tasks: false,
             tasks_suggest: true,
+            linux_modifier: LinuxModifier::default(),
             keybinds: Vec::new(),
             warnings: Vec::new(),
         }
@@ -324,6 +330,10 @@ impl Settings {
                 },
                 "tasks-suggest" => match parse_bool(value) {
                     Some(enabled) => settings.tasks_suggest = enabled,
+                    None => invalid(),
+                },
+                "linux-modifier" => match LinuxModifier::parse(value) {
+                    Some(modifier) => settings.linux_modifier = modifier,
                     None => invalid(),
                 },
                 "keybind" => match value.rsplit_once('=') {
@@ -536,7 +546,8 @@ pub const TEMPLATE: &str = "\
 # catppuccin-macchiato.
 # theme = system
 
-# Editor text size in points (9–32). Cmd/Alt + plus, minus, and 0 change it.
+# Editor text size in points (9–32). Cmd (Linux: the command key) + plus,
+# minus, and 0 change it.
 # editor-font-size = 14
 
 # Editor font family: any installed font. “Change editor font…” lists the
@@ -594,10 +605,18 @@ pub const TEMPLATE: &str = "\
 # tasks = on and editor-engine = advanced.
 # tasks-suggest = on
 
+# The command key on Linux: ctrl, as other apps use, or alt, the way Cmd
+# works on macOS (Ctrl then still undoes, copies, pastes, finds and quits).
+# Ignored on macOS.
+# linux-modifier = ctrl
+
 # Keybindings: keybind = <trigger> = <action>. Later lines win; use `unbind`
-# to remove a default. Modifiers: ctrl, alt, shift, super (cmd).
+# to remove a default. Modifiers: ctrl, alt, shift, super (cmd), and two that
+# follow the platform, so a line moves with them: mod, the command key (Cmd
+# on macOS, linux-modifier on Linux), and opt, the board's second key
+# (Option on macOS; on Linux whichever of Ctrl and Alt mod is not).
 # keybind = ctrl+shift+p = palette.commands
-# keybind = alt+k = unbind
+# keybind = mod+k = unbind
 ";
 
 #[cfg(test)]
@@ -951,6 +970,51 @@ mod tests {
             assert!(settings.warnings[0].contains("line 2: invalid board-key-badges value"));
         }
         assert!(TEMPLATE.contains("\n# board-key-badges = hold\n"));
+    }
+
+    #[test]
+    fn linux_modifier_defaults_to_ctrl_and_parses_ctrl_or_alt() {
+        assert_eq!(Settings::default().linux_modifier, LinuxModifier::Ctrl);
+        assert_eq!(
+            Settings::parse(TEMPLATE).linux_modifier,
+            LinuxModifier::Ctrl
+        );
+        for (value, modifier) in [
+            ("alt", LinuxModifier::Alt),
+            ("ALT", LinuxModifier::Alt),
+            ("\"alt\"", LinuxModifier::Alt),
+            ("ctrl", LinuxModifier::Ctrl),
+        ] {
+            let settings = Settings::parse(&format!("linux-modifier = {value}\n"));
+            assert_eq!(settings.linux_modifier, modifier, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+        }
+        for bad in ["super", "control", "mod", "on", ""] {
+            let settings =
+                Settings::parse(&format!("linux-modifier = alt\nlinux-modifier = {bad}\n"));
+            assert_eq!(settings.linux_modifier, LinuxModifier::Alt, "{bad:?}");
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid linux-modifier value"));
+        }
+        assert!(TEMPLATE.contains("\n# linux-modifier = ctrl\n"));
+        // The writer sets it as it sets `theme`, keeping the commented line.
+        let alt = with_value(TEMPLATE, "linux-modifier", LinuxModifier::Alt.value());
+        assert_eq!(Settings::parse(&alt).linux_modifier, LinuxModifier::Alt);
+        assert!(
+            alt.contains("\n# linux-modifier = ctrl\n") && alt.ends_with("linux-modifier = alt\n")
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.conf");
+        fs::write(&path, "keybind = mod+k = unbind\n").unwrap();
+        write_value(&path, "linux-modifier", "alt").unwrap();
+        write_value(&path, "linux-modifier", "ctrl").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "keybind = mod+k = unbind\nlinux-modifier = ctrl\n"
+        );
+        let settings = Settings::load(&path);
+        assert_eq!(settings.linux_modifier, LinuxModifier::Ctrl);
+        assert_eq!(settings.keybinds, [("mod+k".into(), "unbind".into())]);
     }
 
     #[test]

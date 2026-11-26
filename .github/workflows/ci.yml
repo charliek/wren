@@ -52,7 +52,7 @@ jobs:
       - run: make test-python
 
   linux-smoke:
-    name: Linux smoke (${{ matrix.display }}, ${{ matrix.renderer }}${{ matrix.tasks == 'on' && ', tasks on' || '' }})
+    name: Linux smoke (${{ matrix.display }}, ${{ matrix.renderer }}${{ matrix.tasks == 'on' && ', tasks on' || '' }}${{ matrix.linux_modifier == 'ctrl' && ', Ctrl mode' || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -64,11 +64,16 @@ jobs:
           - display: x11
             renderer: tiny-skia
             tasks: "on"
+          # The shipped default command key; the others pin Alt.
+          - display: x11
+            renderer: wgpu
+            linux_modifier: ctrl
     env:
       DISPLAY_BACKEND: ${{ matrix.display }}
       ICED_BACKEND: ${{ matrix.renderer }}
       WRENTEST_ENGINE: classic,advanced
       WRENTEST_TASKS: ${{ matrix.tasks }}
+      WRENTEST_LINUX_MODIFIER: ${{ matrix.linux_modifier || 'alt' }}
       WGPU_BACKEND: vulkan
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:

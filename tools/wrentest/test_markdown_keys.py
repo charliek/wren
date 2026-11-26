@@ -18,7 +18,7 @@ import pytest
 
 from tools.wrentest.test_editor import engine, focus_native, xdo  # noqa: F401  (fixture)
 from tools.wrentest.test_setup import artifact_directory
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 
 @pytest.fixture
@@ -471,18 +471,18 @@ def test_native_markdown_command_keys(keys_app) -> None:
         def typed(text: str) -> None:
             xdo("type", "--window", window, "--clearmodifiers", "--delay", "12", text)
 
-        key("ctrl+End", "ctrl+Return")
-        native_text(app, "# Title\n- [ ] hello world", "ctrl+Return makes a task")
+        key("ctrl+End", native_mod("Return"))
+        native_text(app, "# Title\n- [ ] hello world", "Mod+Return makes a task")
         # With tasks on the toggle also writes the done stamp, dated by the
         # app's own today, after the caret.
         state = call("tasks.get")
         stamp = f" ✅ {state['today']}" if state["tasks"] else ""
-        key("ctrl+Return")
-        native_text(app, f"# Title\n- [x] hello world{stamp}", "ctrl+Return checks it")
-        key("ctrl+b")
-        native_text(app, f"# Title\n- [x] hello **world**{stamp}", "ctrl+b bolds the word")
-        key("ctrl+i")
-        native_text(app, f"# Title\n- [x] hello ***world***{stamp}", "ctrl+i adds italics")
+        key(native_mod("Return"))
+        native_text(app, f"# Title\n- [x] hello world{stamp}", "Mod+Return checks it")
+        key(native_mod("b"))
+        native_text(app, f"# Title\n- [x] hello **world**{stamp}", "Mod+b bolds the word")
+        key(native_mod("i"))
+        native_text(app, f"# Title\n- [x] hello ***world***{stamp}", "Mod+i adds italics")
         key("alt+Up")
         native_text(app, f"- [x] hello ***world***{stamp}\n# Title", "alt+Up moves the line")
         key("alt+Down")
@@ -494,7 +494,7 @@ def test_native_markdown_command_keys(keys_app) -> None:
         key("ctrl+f")
         wait_for(lambda: call("editor.get")["find_open"], description="ctrl+f opens find")
         typed("wor")
-        key("ctrl+b", "ctrl+Return", "alt+Up")
+        key(native_mod("b"), native_mod("Return"), "alt+Up")
         typed("l")
         wait_for(lambda: call("editor.get")["find_query"] == "worl", description="find typing")
         assert call("editor.get")["text"] == f"- [x] hello ***world***{stamp}\n# Title"
@@ -516,7 +516,7 @@ def test_native_alt_up_in_the_notes_column_leaves_the_text(tmp_path: Path, keys_
         key("alt+Up", "alt+Down")
         # Column right is an app shortcut: once it lands, so have the keys
         # before it.
-        key("alt+shift+bracketright")
+        key(native_mod("shift+bracketright"))
         wait_for(lambda: call("navigation.get")["column"] == "editor",
                  description="back in the editor")
         assert call("editor.get")["text"] == "1. a\n2. b"

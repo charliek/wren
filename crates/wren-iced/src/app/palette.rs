@@ -449,11 +449,6 @@ impl App {
             palette.error = Some(error.into());
             return self.blocked(error);
         }
-        // `?` opens the keys sheet and closes it, whatever the layout
-        // types it with; it filters nothing there.
-        if palette.mode == Mode::BoardKeys && query.contains('?') {
-            return self.close_palette();
-        }
         palette.query = query;
         palette.error = None;
         self.refresh_palette(true);
@@ -512,13 +507,17 @@ impl App {
                             // palette, which `board.jump` names.
                             && !(board
                                 && matches!(definition.id, CommandId::Find | CommandId::Outline))
+                            && (wren_core::keybind::Platform::current()
+                                == wren_core::keybind::Platform::Linux
+                                || !definition.id.linux_only())
                     }) {
-                        if fuzzy_score(&query, definition.label).is_none() {
+                        let title = self.command_title(definition);
+                        if fuzzy_score(&query, title).is_none() {
                             continue;
                         }
                         rows.push(ResultRow {
                             key: Key::Command(definition.id),
-                            title: definition.label.into(),
+                            title: title.into(),
                             path: String::new(),
                             snippet: String::new(),
                             highlight: None,
@@ -1376,7 +1375,7 @@ impl App {
                 .style(move |_| chrome::surface(self.definition, colors.selected, 4.0, false)),
             );
         }
-        input = input.push(
+        input = input.push(crate::field_keys::field_keys(
             text_input(
                 if palette.workspace_removal {
                     "Choose a workspace to remove from the list…"
@@ -1390,7 +1389,8 @@ impl App {
             .padding([4, 0])
             .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
             .style(move |_, status| chrome::input(self.definition, status, false)),
-        );
+            &self.preferences.field_keys,
+        ));
         input = if self.loading.is_some() {
             input.push(text("Opening…").size(12).color(theme::color(colors.muted)))
         } else if search {

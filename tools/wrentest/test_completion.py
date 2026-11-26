@@ -12,7 +12,7 @@ from tools.wrentest import test_navigation as nav
 from tools.wrentest.test_gestures import native_workspace
 from tools.wrentest.test_navigation import vault, vault_factory
 from tools.wrentest.test_setup import artifact_directory, editor_column
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 from tools.wrentest.x11 import read_pixels
 
 
@@ -298,7 +298,7 @@ def test_screenshot_matches_native_hover_and_focused_input_styles(native_workspa
 def test_native_palette_preference_actions_restore_editor_typing_focus(native_workspace, query, command):
     app, root, window = native_workspace
     original = gestures.session(app)["document"]["text"]
-    gestures.keys(window, "alt+shift+p")
+    gestures.keys(window, native_mod("shift+p"))
     wait_for(lambda: gestures.navigation(app)["modal"] is not None)
     gestures.type_text(window, query)
     wait_for(lambda: gestures.navigation(app)["modal"]["query"] == query)
@@ -351,13 +351,13 @@ def test_native_double_click_opens_and_alt_r_renames_without_replacing_the_docum
     wait_for(lambda: gestures.navigation(app)["column"] == "editor",
              description="native double-click moves into the editor")
     assert gestures.navigation(app)["dialog"] is None
-    gestures.keys(window, "alt+r")
-    wait_for(lambda: gestures.navigation(app)["dialog"] is not None, description="Alt+R naming dialog")
+    gestures.keys(window, native_mod("r"))
+    wait_for(lambda: gestures.navigation(app)["dialog"] is not None, description="Mod+R naming dialog")
     gestures.keys(window, "ctrl+a")
     gestures.type_text(window, "Renamed by shortcut")
     gestures.keys(window, "Return")
     destination = root / gestures.SOURCE / "Renamed by shortcut.md"
-    wait_for(destination.is_file, description="native Alt+R rename commits")
+    wait_for(destination.is_file, description="native Mod+R rename commits")
     assert not (root / gestures.ORIGIN).exists()
     assert destination.read_bytes() == original
     assert gestures.session(app)["document"]["note"] == source["id"]

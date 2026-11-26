@@ -97,6 +97,34 @@ The `make smoke-*` targets pass the variable through, so
 cases on the advanced engine. CI sets `WRENTEST_ENGINE=classic,advanced` on
 all four Linux smoke lanes.
 
+### Command key
+
+On Linux the build's default command key is Ctrl, but the harness pins
+`linux-modifier = alt` in every case's `config.conf`, so the cases written
+with Alt shortcuts mean the same thing whatever the default is. A case that
+names `linux-modifier` itself keeps its own value. `WRENTEST_LINUX_MODIFIER`
+sets the pin for a run:
+
+```sh
+WRENTEST_LINUX_MODIFIER=ctrl ICED_BACKEND=tiny-skia make smoke-x11
+```
+
+It takes `ctrl` or `alt` (`alt` when unset), and anything else fails the
+run. macOS ignores the setting. CI runs one lane (X11, wgpu) with it `ctrl`,
+the shipped default, and the others with `alt`.
+
+Cases name keys with the logical modifiers instead of ⌘, Ctrl or Alt.
+`editor.key` and `board.key` take `mod` (the command key: ⌘ on macOS, Ctrl or
+Alt on Linux as the lane says) and `opt` (the board's second key: ⌥, or the
+other of Ctrl and Alt) in `mods`, next to `shift`, `ctrl`, `alt` and `logo`.
+For native X11 keys and for labels, `tools/wrentest/ui.py` has three helpers:
+
+| Helper | Gives |
+|---|---|
+| `native_mod(key)` | An `xdotool` chord of `key` on the lane's command key, such as `alt+Return`. |
+| `native_opt(key)` | The same on the board's second key: Alt with Ctrl as the command key, Ctrl with Alt. |
+| `mod_label()` | How the app writes the command key in a label: `⌘` on macOS, `Ctrl+` or `Alt+` on Linux. |
+
 ### Spell check
 
 `WRENTEST_SPELL` sets the `spell-check` setting the harness writes for
@@ -122,7 +150,7 @@ and press the real suggest key. These requests drive it:
 |---|---|---|
 | `editor.spell` | none | `enabled` (the setting on the advanced engine), `ready` (the dictionary has loaded), `marks` as the last frame drew them (none while a board is shown, since the editor draws nothing then), and `menu`, or `null` when it is closed. |
 | `editor.spell_event` | `event`: `open_at_caret`, `move`, `hover`, `accept`, or `close`; `arg`: a row for `hover` and `accept`, a step for `move` | The `editor.get` snapshot, after the event went through the app as the widget would send it. |
-| `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
+| `editor.key` | `key`: a name (`up`, `down`, `left`, `right`, `enter`, `escape`, `tab`, `space`, `backspace`, `delete`, `home`, `end`, `shift`, `control`, `alt`, `super`, `caps_lock`) or one character; `mods`: a list of `shift`, `ctrl`, `alt`, `logo`, `mod`, `opt` | The `editor.get` snapshot, after the editor's own key routing and then the app's key handling, as a real press in the focused editor. |
 | `editor.right_click` | `line`, `column`: the byte offset in the line of the character to click on, or the line's length for the end of its text | The `editor.get` snapshot, after a right-click on that character went through the app as the editor would send it: on a misspelled word, the menu opens, and with a menu open the click only closes it. A click nothing answers changes nothing. |
 | `editor.click` | `line`, `column`, as for `editor.right_click` | The `editor.get` snapshot, after a left click, pressed and let go on that character, went through the app: on a task's box (tasks on, the advanced engine) it cycles the task's status, and anywhere else it places the caret. |
 | `editor.bounds` | `line`, `start`, `end`: a byte range of the line | Where the range is drawn, `x`, `y`, `width` and `height` in window coordinates, for a native click on it; an error while it is not drawn. |
@@ -203,7 +231,7 @@ The board requests:
 | `board.bounds` | Where the widget and each node, label and connector are drawn in the window, in logical pixels, with each element's fill and stroke colour and the window's scale factor; the handles shown (`nw` to `w` on the one selected node, `connect_top` to `connect_left` on the node the pointer has rested on, `from` and `to` on the one selected connector, and `side_top` to `side_left` on the node a dragged connector end is over) and the open label's box. |
 | `board.pointer` | A wheel step (`{"kind": "wheel", "at": …, "delta": {"x", "y", "unit"}, "mods": ["mod", "shift"]}`), a trackpad pinch (`{"kind": "pinch", "at": …, "delta": 0.25}`, the zoom multiplied by 1 + `delta`) or a button's `press`, `move`, `release`, `click` or `double_click` (`"button": "left"`, `"middle"` or `"right"`, `"mods": ["shift", "duplicate"]`), through the path the widget's own input takes. A press on a board without the keyboard first gives it the keyboard, as a real press does, and then presses. `at` is `{"node": id}`, `{"node": id, "handle": "se"}` (a resize handle `nw` to `w`, a connect handle `connect_top` to `connect_left`, or a side handle `side_top` to `side_left`, the middle of that side on the outline), `{"edge": id}` (the middle of its line), `{"edge": id, "handle": "from"}` (or `"to"`, one of its ends), `{"canvas": [x, y]}` in board units, or `{"screen": [x, y]}` in the window. A `move` with no button down is the pointer passing over the board: it reaches only a board that has the keyboard, and the connect handles of the node it rests on come up 120 ms later. |
 | `board.pinch` `{"delta": 0.25}` | Records a trackpad pinch for the window as the vendored `iced_winit` records winit's `PinchGesture` on macOS (`vendor/iced_winit/WREN.md`), on any platform. The window's next frame gives it to the board if the real pointer is over the board then, and drops it if not, so a test places the pointer first (the native X11 case moves it with `xdotool`). Answers `{"recorded": delta}` at once; the zoom changes with that frame. |
-| `board.key` `{"key": "tab", "mods": ["mod", "shift"], "repeat": false}` | A key pressed on the focused board, through the board's key policy and then the app's keyboard path, as a real key goes; `mod` is ⌘ on macOS and Ctrl elsewhere. A letter with `shift` types its capital and is named, as a real press names it, by the letter without its modifiers. Answers the snapshot with `handled`, whether the board took the key; with a palette or dialog open, or another widget focused, nothing happens. `{"key": "space", "release": true}` lets go of a held Space, as the widget hears its release; Space alone is released. |
+| `board.key` `{"key": "tab", "mods": ["mod", "shift"], "repeat": false}` | A key pressed on the focused board, through the board's key policy and then the app's keyboard path, as a real key goes; `mod` is the lane's command key (⌘ on macOS, Ctrl or Alt on Linux) and `opt` the board's second key. A letter with `shift` types its capital and is named, as a real press names it, by the letter without its modifiers. Answers the snapshot with `handled`, whether the board took the key; with a palette or dialog open, or another widget focused, nothing happens. `{"key": "space", "release": true}` lets go of a held Space, as the widget hears its release; Space alone is released. |
 | `board.dock` `{"click": id}` | The board's tool dock: whether it is `shown`, whether its shapes are `folded` into one button, the bar's `rect`, its `buttons` in order (each with its `id`, such as `board-dock-rectangle`, `board-dock-more`, `board-dock-shapes` or `board-dock-keys`; the `command` it runs, or `null` for a menu button; whether it is `lit` and `locked`; its `key` from the keymap; the `badge` it shows now, or `null`; its `tip`; and its `rect`) and the open `menu` (its `kind`, `more` or `shapes`, its `rect`, and its `rows`, each with its `id`, `command`, `lit`, `locked`, `key` and `rect`), or `null`. Each `rect` is where the last frame drew it, in logical pixels, or `null` before one has. With `click`, a button's or a row's id, the message a click there sends goes first; an id the dock does not show is an error. |
 | `board.style_bar` `{"hover": id, "click": id}` | The board's style bar: whether it is `shown`, whether it is the `new_shapes` row, whether its styles are `folded` into the last menu, the bar's `rect`, its `controls` in order (each with its `id`, such as `board-style-shape`, `board-style-red`, `board-style-fill-solid`, `board-style-text-size`, `board-style-route` or `board-style-more`; the `command` it runs, or `null` for a menu button; whether it is `current`; the `shape` the shape button draws, or `null` for several; its `key`, the `badge` it shows now, its `tip`, a swatch's `color` as `[r, g, b]`, and its `rect`), the open `menu` (its `kind`, `shapes`, `text_size` or `more`, its `rect`, and its `rows`, each with its `id`, `command`, `name`, `current`, `key` and `rect`), the command the pointer previews as `hover`, and the accent the current swatch is ringed in as `ring`. With `hover`, a control's or a row's id that previews, the pointer comes onto it first, and with `null` it leaves; with `click`, the message a click there sends goes next. An id the bar does not show is an error, and so is a `hover` on one that previews nothing. |
 | `board.footer` `{"click": id}` | The controls in the footer under the board, `board-footer-undo`, `board-footer-redo`, `board-footer-zoom-out`, `board-footer-zoom` and `board-footer-zoom-in` (none with `board-toolbar = off`, and no undo or redo on a read-only board), each with the `command` it runs, whether it is `enabled`, its `key`, `tip` and `rect`; and the `zoom` the footer shows. With `click`, a control's id, the message a click there sends goes first; a greyed control sends only what closes the bars' menus. |

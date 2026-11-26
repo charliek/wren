@@ -66,6 +66,8 @@ use iced::{window, Element, Event, Font, Length, Rectangle, Size, Vector};
 use wren_markdown::calendar;
 use wren_markdown::date::{self, Date, Parsed};
 
+use crate::field_keys::FieldKeys;
+
 /// What the field hands the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldEvent {
@@ -121,6 +123,7 @@ where
         live,
         configure,
         on_event,
+        keys: FieldKeys::default(),
     };
     field.input = field.build(value);
     field
@@ -138,6 +141,8 @@ where
     live: Rc<RefCell<String>>,
     configure: Configure<'a, Message, Theme, Renderer>,
     on_event: Rc<dyn Fn(FieldEvent) -> Message + 'a>,
+    /// The keymap's text editing keys, handed to the text input as its own.
+    keys: FieldKeys,
 }
 
 #[derive(Debug, Default)]
@@ -217,7 +222,17 @@ where
                 live.borrow_mut().clone_from(&text);
                 on_event(FieldEvent::Typed(text))
             });
-        (self.configure)(input).into()
+        crate::field_keys::field_keys((self.configure)(input), &self.keys)
+    }
+
+    /// Hand the text input the keymap's text editing `keys` as its own
+    /// ([`crate::field_keys`]).
+    #[must_use]
+    pub fn field_keys(mut self, keys: &FieldKeys) -> Self {
+        self.keys = keys.clone();
+        let value = self.live.borrow().clone();
+        self.input = self.build(&value);
+        self
     }
 
     fn input_focused(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer) -> bool {
@@ -1014,5 +1029,82 @@ mod tests {
             route(&Key::Named(Named::Tab), Modifiers::SHIFT, false, true),
             Some(None)
         );
+    }
+
+    /// With the keymap's text editing keys, in Linux's Alt mode Alt+A,
+    /// Alt+C and Alt+V select, copy and paste in the field, as Ctrl does;
+    /// in Ctrl mode Alt does none of it.
+    // Real iced input on Linux, where its clipboard keys are Ctrl's.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_field_takes_the_keymap_s_editing_keys() {
+        use crate::field_keys::tests::{chord, linux, Kept};
+        use crate::field_keys::FieldKeys;
+        use wren_core::keybind::LinuxModifier;
+
+        let run = |keys: &FieldKeys, events: &[Event]| {
+            let element = |value: &str| -> Element<'static, FieldEvent, Theme, ()> {
+                date_field(
+                    "type a date",
+                    value,
+                    Date::new(2026, 11, 19).expect("a date"),
+                    |input| input.id(ID).width(200),
+                    |event| event,
+                )
+                .field_keys(keys)
+                .into()
+            };
+            let mut value = String::from("fri");
+            let mut first = element(&value);
+            let mut tree = Tree::new(&first);
+            let node = first.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 100.0)),
+            );
+            first.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &(),
+                &mut operation::focusable::focus(Id::new(ID)),
+            );
+            let mut kept = Kept::default();
+            let mut published = Vec::new();
+            for event in events {
+                let mut element = element(&value);
+                element.as_widget_mut().diff(&mut tree);
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &crate::keys::tests::without_alt_text(event),
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &(),
+                    &mut kept,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 100.0)),
+                );
+                for message in &messages {
+                    if let FieldEvent::Typed(text) = message {
+                        value.clone_from(text);
+                    }
+                }
+                published.extend(messages);
+            }
+            (published, kept.0)
+        };
+        let alt = Modifiers::ALT;
+        let events = [
+            chord("a", alt),
+            chord("c", alt),
+            press(Key::Named(Named::End), Modifiers::empty(), None),
+            chord("v", alt),
+        ];
+        let (published, kept) = run(&linux(LinuxModifier::Alt), &events);
+        assert_eq!(published, [FieldEvent::Typed("frifri".into())]);
+        assert_eq!(kept.as_deref(), Some("fri"));
+        let (published, kept) = run(&linux(LinuxModifier::Ctrl), &events);
+        assert_eq!((published, kept), (Vec::new(), None));
     }
 }

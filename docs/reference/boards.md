@@ -9,16 +9,17 @@ itself and export to SVG, PNG, and draw.io, in the app or from the
 `wren export` command line.
 
 Keys below are written macOS first, then Linux. On a board, **Mod** is ⌘ on
-macOS and **Ctrl** on Linux, the modifier text editing uses; the app's own
-shortcuts keep ⌘ and Alt. The full key list is in
+macOS and **Ctrl** on Linux (or Alt with `linux-modifier = alt`), the same
+command key as the app's own shortcuts. **Opt** is the second key, ⌥ on macOS
+and, on Linux, whichever of Ctrl and Alt Mod is not. The full key list is in
 [Keybindings](../getting-started/keybindings.md#on-a-board).
 
 ## Creating a board
 
-**New note…** (⌘N / Alt+N) has two kind pills under the name field,
+**New note…** (⌘N / Mod+N) has two kind pills under the name field,
 Markdown and Board. Markdown is selected every time the dialog opens; Tab
 and Shift+Tab switch the pill while the keyboard stays in the name field.
-So a new board is ⌘N, the name, Tab, Enter. **New board…** in the command
+So a new board is ⌘N (Mod+N), the name, Tab, Enter. **New board…** in the command
 palette opens the same dialog with Board already picked. Rename never
 changes a note's kind.
 
@@ -73,8 +74,8 @@ there is no key to turn snapping off. A unit is one pixel at 100 %.
 | Arrows | Select the nearest shape in that direction. Walking never changes the file. |
 | Shift+Arrow | Add that shape to the selection. |
 | Shift+Mod+Arrow | Select the connector that meets the selected shape on that side. |
-| Alt+Arrow | Move the selection one grid cell. |
-| Alt+Shift+Arrow | Make the selected shapes wider (→), narrower (←), taller (↓), or shorter (↑) by one cell. |
+| Opt+Arrow | Move the selection one grid cell. |
+| Opt+Shift+Arrow | Make the selected shapes wider (→), narrower (←), taller (↓), or shorter (↑) by one cell. |
 
 The flow direction is the way most connectors on the board point; on a
 board with none it is down. A new shape takes the nearest free place in
@@ -117,7 +118,7 @@ changes, so walking with the arrows picks up where you were.
   it back), and a selected connector whose ends are not both cut stays on
   the board.
 
-**Undo.** Mod+Z and ⇧Mod+Z (also Ctrl+Y on Linux) undo and redo whole
+**Undo.** Mod+Z and Mod+Shift+Z undo and redo whole
 steps: a drag, a command, a finished label, a run of arrow-key moves. Undo
 puts the selection back too. Undoing every step returns the file to the
 exact bytes it was opened with. The history holds up to 200 steps and is
@@ -333,7 +334,7 @@ board is never under it. A read-only board has no style bar.
 ## The footer's controls
 
 Under a board, the zoom figure is three controls: − zooms out, the figure
-zooms to fit, and + zooms in, as ⌘- / Alt+-, ⇧1, and ⌘= / Alt+= do. Undo
+zooms to fit, and + zooms in, as Mod+-, ⇧1, and Mod+= do. Undo
 and redo sit before them, greyed and doing nothing when there is nothing
 to undo or redo. A click there leaves the keyboard with the board, and an
 armed tool stays armed. Where the footer is narrow, the counts and the
@@ -350,7 +351,7 @@ is selected or armed, between the counts and the zoom:
 |---|---|
 | Nothing selected | Tab add a shape · R O D U Y P pick a shape · Space show keys · ? all keys |
 | One shape | Tab next shape · Mod+Arrow connect · ↵ label · 0–7 colour · Shift+D reshape · / actions |
-| Several shapes | 0–7 colour · Alt+Arrow move · / align and distribute (align alone with two) · ⌫ delete |
+| Several shapes | 0–7 colour · Opt+Arrow move · / align and distribute (align alone with two) · ⌫ delete |
 | Connectors only | 0–7 colour · ↵ label · / route, heads, reverse · ⌫ delete |
 | A shape or text tool armed | click to place · drag to size · Tab add it after the selection · R again to lock (or to unlock) · esc cancel |
 | Connector tool | drag from one shape to another · esc cancel |
@@ -405,8 +406,8 @@ other way, drops the preview; nothing is written.
 on the board in reading order (top, then left), with the label's first line
 as the title and, at the end of the row, the shape's name, `text`,
 `connector`, or, for a placeholder, its kind (`placeholder` when it has
-none). On a board, Jump to heading (⇧⌘O / Alt+Shift+O) and Find in note
-(⌘F / Alt+F or Ctrl+F) open it. Type to filter. Moving the highlight
+none). On a board, Jump to heading (Mod+Shift+O) and Find in note
+(Mod+F) open it. Type to filter. Moving the highlight
 selects and centres that element; ↵ keeps it and gives the board the
 keyboard, and Esc puts the selection and the view back.
 
@@ -420,7 +421,7 @@ searched as text; the file's own syntax (`kind`, `schema`) is not.
 |---|---|---|
 | Pan | Scroll, Shift+scroll sideways, middle-drag, Space+drag, or the hand tool (which stays armed) | the same |
 | Zoom at the pointer | ⌘+scroll, or pinch on the trackpad | Ctrl+scroll |
-| Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Alt+= / Alt+- / Alt+0 |
+| Zoom in / out / to 100 % | ⌘= / ⌘- / ⌘0 | Mod+= / Mod+- / Mod+0 |
 | Zoom to fit / to selection | ⇧1 / ⇧2 | the same |
 
 The text-size keys step through 10, 15, 25, 35, 50, 60, 75, 85, 100, 125,

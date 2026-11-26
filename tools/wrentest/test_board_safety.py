@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 from tools.wrentest.boards import (
-    FLOW, GROUP, HAND_WRITTEN, NOTES, blocks, board, board_app, click, copy_samples, fitted, flushed,
-    key, note_id, open_note, stamp, type_text,
+    FLOW, GROUP, HAND_WRITTEN, NOTES, blocks, board, board_app, click, copy_samples,
+    fitted, flushed, key, note_id, open_note, stamp, type_text,
 )
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_board_view import focused, wait_focus
@@ -100,7 +100,7 @@ def test_only_the_board_writes_a_board(samples: Path) -> None:
     with board_app(samples, "board-safety-writer") as app:
         ready(app)
         click(app, {"node": PACK})
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         flushed(app)
         edited = flow.read_bytes()
         for op, params in [
@@ -141,9 +141,9 @@ def test_a_sequence_that_changes_nothing_writes_nothing(samples: Path) -> None:
             key(app, arrow)
         key(app, "enter")
         key(app, "escape")
-        key(app, "right", "alt")
-        key(app, "left", "alt")
-        key(app, "down", "alt")
+        key(app, "right", "opt")
+        key(app, "left", "opt")
+        key(app, "down", "opt")
         key(app, "z", "mod")
         key(app, "z", "mod", "shift")
         state = key(app, "z", "mod")
@@ -220,7 +220,7 @@ def test_a_notice_leaves_the_keyboard_where_it_was(samples: Path, notice: str) -
         assert focused(app) == ["note-editor"]
         if notice == "blocked paste":
             before = board(app, elements=True)
-            state = key(app, "right", "alt")
+            state = key(app, "right", "opt")
             assert state["handled"], state
             after = board(app, elements=True)
             assert before["nodes"] != after["nodes"]
@@ -249,7 +249,7 @@ def test_a_connector_named_as_a_node_is_acted_on_alone(samples: Path) -> None:
         click(app, {"edge": "shared"})
         assert key(app, "enter")["editing"]["text"] == "Edge shared"
         key(app, "escape")
-        key(app, "right", "alt")
+        key(app, "right", "opt")
         node = next(n for n in board(app, elements=True)["nodes"] if n["id"] == "shared")
         assert node["at"] == [0, 300]
         state = key(app, "delete")

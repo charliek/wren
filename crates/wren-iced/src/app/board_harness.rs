@@ -864,7 +864,7 @@ impl App {
             .board
             .as_ref()
             .ok_or("The open note is not shown as a board")?;
-        let pressed = pressed_key(params)?;
+        let pressed = pressed_key(params, self.preferences.keymap.scheme())?;
         if !placement.focused || self.palette.is_some() || self.dialog.is_some() {
             return Ok((Task::none(), false));
         }
@@ -1169,12 +1169,14 @@ struct Pressed {
 
 /// The key `board.key` names: a named key (`tab`, `enter`, `escape`,
 /// `backspace`, `delete`, `left`, `right`, `up`, `down`, `home`, `end`,
-/// `space`, `f1` to `f12`) or one character, with `mods` of `mod` (⌘ on
-/// macOS, Ctrl elsewhere, as document commands use), `ctrl`, `alt`,
-/// `shift` and `logo`.
-fn pressed_key(params: &Value) -> Result<Pressed, String> {
+/// `space`, `f1` to `f12`) or one character, with `mods` of `mod` and
+/// `opt` (`scheme`'s command key and the board's other one: ⌘ and ⌥ on
+/// macOS), `ctrl`, `alt`, `shift` and `logo`.
+fn pressed_key(params: &Value, scheme: wren_core::keybind::Scheme) -> Result<Pressed, String> {
+    use super::test_requests::logical_modifier;
     use iced::keyboard::key::{Code, Named, NativeCode, Physical};
     use iced::keyboard::{Key, Modifiers};
+    use wren_core::keybind::Logical;
     let name = string(params, "key")?;
     let mut modifiers = Modifiers::empty();
     for modifier in params
@@ -1183,12 +1185,13 @@ fn pressed_key(params: &Value) -> Result<Pressed, String> {
         .map_or(&[][..], Vec::as_slice)
     {
         modifiers |= match modifier.as_str() {
-            Some("mod") if cfg!(target_os = "macos") => Modifiers::LOGO,
-            Some("mod" | "ctrl") => Modifiers::CTRL,
+            Some("mod") => logical_modifier(scheme, Logical::Mod),
+            Some("opt") => logical_modifier(scheme, Logical::Opt),
+            Some("ctrl") => Modifiers::CTRL,
             Some("alt") => Modifiers::ALT,
             Some("shift") => Modifiers::SHIFT,
             Some("logo") => Modifiers::LOGO,
-            _ => return Err("mods are mod, ctrl, alt, shift and logo".into()),
+            _ => return Err("mods are mod, opt, ctrl, alt, shift and logo".into()),
         };
     }
     let repeat = params

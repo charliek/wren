@@ -24,7 +24,7 @@ from tools.wrentest.client import RemoteError
 from tools.wrentest.test_editor import engine, focus_native, xdo  # noqa: F401  (fixture)
 from tools.wrentest.test_setup import artifact_directory
 from tools.wrentest.test_tasks_baseline import saved
-from tools.wrentest.ui import WrenApp, wait_for
+from tools.wrentest.ui import WrenApp, native_mod, wait_for
 
 TODAY = "2026-11-19"
 NOTE = "Tasks/Commands/Commands.md"
@@ -210,7 +210,7 @@ def test_off_a_task_line_the_commands_are_listed_greyed_and_do_nothing(
 
 
 def test_the_toggle_stamps_from_the_palette_and_its_key(tmp_path: Path, engine: str) -> None:  # noqa: F811
-    toggle = ["logo"] if os.uname().sysname == "Darwin" else ["ctrl"]
+    toggle = ["mod"]
     with commands_app(tmp_path, engine, "on") as (app, path):
         call = app.client.call
         for start, after in [
@@ -328,7 +328,7 @@ def test_a_menu_of_command_rows_takes_its_keys(tmp_path: Path, engine: str) -> N
 
 def test_with_tasks_off_no_task_command_runs_and_the_toggle_writes_no_stamp(
         tmp_path: Path, engine: str) -> None:  # noqa: F811
-    toggle = ["logo"] if os.uname().sysname == "Darwin" else ["ctrl"]
+    toggle = ["mod"]
     with commands_app(tmp_path, engine, "off") as (app, path):
         call = app.client.call
         line = line_of("- [ ] Open")
@@ -357,11 +357,11 @@ def test_native_ctrl_enter_toggles_with_a_stamp(tmp_path: Path, engine: str) -> 
         line = line_of("- [/] Doing")
         at_end(app, line)
         window = focus_native(app)
-        xdo("key", "--window", window, "--clearmodifiers", "ctrl+Return")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("Return"))
         expected = replaced(line, "- [x] Doing bravo ⏫ ✅ 2026-11-19")
         wait_for(lambda: call("editor.get")["text"] == expected,
                  description="Ctrl+Enter checks the task with a stamp")
         saved(app, path, expected)
-        xdo("key", "--window", window, "--clearmodifiers", "ctrl+Return")
+        xdo("key", "--window", window, "--clearmodifiers", native_mod("Return"))
         wait_for(lambda: call("editor.get")["text"] == replaced(line, "- [ ] Doing bravo ⏫"),
                  description="Ctrl+Enter reopens it without the stamp")

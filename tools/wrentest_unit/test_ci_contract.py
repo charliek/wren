@@ -101,10 +101,18 @@ class WorkflowContractTests(unittest.TestCase):
             "          - display: x11\n"
             "            renderer: tiny-skia\n"
             '            tasks: "on"\n'
+            "          # The shipped default command key; the others pin Alt.\n"
+            "          - display: x11\n"
+            "            renderer: wgpu\n"
+            "            linux_modifier: ctrl\n"
             "    env:\n",
             smoke,
         )
         self.assertEqual(re.findall(r"(?m)^ +tasks: (.*)$", smoke), ['"on"'])
+        # Exactly one lane (x11, wgpu) in Linux's default Ctrl mode, and the
+        # others in the harness's Alt.
+        self.assertEqual(re.findall(r"(?m)^ +linux_modifier: (.*)$", smoke), ["ctrl"])
+        self.assertIn("WRENTEST_LINUX_MODIFIER: ${{ matrix.linux_modifier || 'alt' }}", smoke)
         self.assertNotIn("exclude:", smoke)
         self.assertEqual(smoke.count("WRENTEST_ENGINE:"), 1)
         self.assertRegex(smoke, r"if: always\(\)\n +uses: actions/upload-artifact@")

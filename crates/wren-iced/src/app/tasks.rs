@@ -378,7 +378,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use wren_core::keybind::{self, Platform};
+    use wren_core::keybind;
 
     use super::super::commands::{definitions, CommandId};
     use super::super::palette::{Key as Row, Mode};
@@ -820,44 +820,40 @@ mod tests {
     /// platforms, and a `keybind` line naming a task command is refused.
     #[test]
     fn with_tasks_off_the_keymap_is_unchanged_on_both_platforms() {
-        for platform in [Platform::Mac, Platform::Linux] {
-            let (off, warnings) = super::super::preferences::build_keymap(platform, &[], false);
+        for scheme in super::super::preferences::SCHEMES {
+            let (off, warnings) = super::super::preferences::build_keymap(scheme, &[], false);
             assert!(warnings.is_empty());
             let (before, _) = wren_core::keybind::Keymap::build(
-                keybind::default_bindings(platform)
+                scheme,
+                keybind::default_bindings(scheme)
                     .into_iter()
-                    .chain(keybind::default_board_bindings(platform)),
+                    .chain(keybind::default_board_bindings(scheme)),
                 &[],
                 super::super::preferences::layer_of,
             );
-            assert_eq!(off, before, "{platform:?}");
-            let (on, _) = super::super::preferences::build_keymap(platform, &[], true);
-            let tasks = keybind::default_task_bindings(platform);
+            assert_eq!(off, before, "{scheme:?}");
+            let (on, _) = super::super::preferences::build_keymap(scheme, &[], true);
+            let tasks = keybind::default_task_bindings(scheme);
             assert_eq!(
                 on.bindings().count(),
                 off.bindings().count() + tasks.len(),
-                "{platform:?}"
+                "{scheme:?}"
             );
             for (trigger, action) in &tasks {
                 let id = CommandId::parse(action).expect("a task default names a command");
                 assert!(id.tasks(), "{trigger} → {action}");
                 let accel = keybind::parse_trigger(trigger).unwrap();
-                assert_ne!(off.action(&accel), Some(*action), "{platform:?}");
+                assert_ne!(off.action(&accel), Some(*action), "{scheme:?}");
             }
         }
         // The keys the design gives task commands (discovery/tasks.md §2
         // items 21) stay as they were with tasks off.
-        for (platform, triggers) in [
-            (
-                Platform::Mac,
-                ["super+d", "super+shift+enter", "super+shift+t"],
-            ),
-            (
-                Platform::Linux,
-                ["ctrl+d", "ctrl+shift+enter", "alt+shift+t"],
-            ),
-        ] {
-            let (off, _) = super::super::preferences::build_keymap(platform, &[], false);
+        for (scheme, triggers) in super::super::preferences::SCHEMES.into_iter().zip([
+            ["super+d", "super+shift+enter", "super+shift+t"],
+            ["ctrl+d", "ctrl+shift+enter", "ctrl+shift+t"],
+            ["alt+d", "alt+shift+enter", "alt+shift+t"],
+        ]) {
+            let (off, _) = super::super::preferences::build_keymap(scheme, &[], false);
             for trigger in triggers {
                 let accel = keybind::parse_trigger(trigger).unwrap();
                 let bound = off.action(&accel).or(off.board_action(&accel));
@@ -865,7 +861,7 @@ mod tests {
                     bound
                         .and_then(CommandId::parse)
                         .is_none_or(|id| !id.tasks()),
-                    "{platform:?} {trigger} is {bound:?}"
+                    "{scheme:?} {trigger} is {bound:?}"
                 );
             }
         }

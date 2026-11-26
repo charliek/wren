@@ -45,7 +45,7 @@ pub use highlighter::HighlightedLine;
 #[cfg(feature = "test-support")]
 pub use highlighter::{highlight_lines, Highlight, Highlights, LineDecor, Scale};
 pub use hit::Hit;
-pub use keys::{KeyPolicy, KeyRoute};
+pub use keys::{is_alt_graph, EditKey, KeyPolicy, KeyRoute};
 pub use popover::{
     is_plain_escape, Accelerator, Anchor, Choice, Clicked, MenuProvider, MenuSource, Mode, Popover,
     PopoverEvent, Provider, Requested, Row, RowKind, Seen, Stroke, SuggestSource, Suggestion,
@@ -153,11 +153,11 @@ pub struct Palette {
 pub enum Message {
     /// An iced text-editor action (typing, cursor motion, scroll, mouse, IME).
     Action(text_editor::Action),
-    /// Undo the last edit unit (Ctrl/Cmd+Z).
+    /// Undo the last edit unit: ⌘Z, or the host's [`EditKey::Undo`] key.
     Undo,
-    /// Redo the next edit unit (Ctrl/Cmd+Shift+Z, Linux Ctrl+Y).
+    /// Redo the next edit unit: ⌘⇧Z, or the host's [`EditKey::Redo`] key.
     Redo,
-    /// Open the find bar (Ctrl/Cmd+F).  The parent owns the bar UI and focus.
+    /// Open the find bar (⌘F on macOS).  The parent owns the bar UI and focus.
     Find,
     /// An editing key that depends on the text around the cursor: Enter,
     /// Tab, Backspace, Home, and the like. See [`EditorView::intent`].
@@ -1416,8 +1416,8 @@ impl EditorView {
                 self.handback_over();
                 false
             }
-            // Only Ctrl or Cmd+F routes to Find, never a plain key; a
-            // command and a click on a box are the host's.
+            // Only ⌘F routes to Find, never a plain key; a command and a
+            // click on a box are the host's.
             Message::Find | Message::Command(_) | Message::BoxClick(_) => false,
         }
     }
@@ -3399,6 +3399,14 @@ mod tests {
             ev.spell(SpellEvent::OpenAtCaret);
             ev.move_cursor(at(0, 1));
             ev.spell(SpellEvent::OpenAtCaret);
+            // Undo on the key a host binds it to.
+            ev.set_key_policy(Arc::new(|key: &Key, _, modifiers: Modifiers| {
+                if modifiers == Modifiers::COMMAND && *key == Key::Character("z".into()) {
+                    KeyRoute::Edit(EditKey::Undo)
+                } else {
+                    KeyRoute::Pass
+                }
+            }));
             let undo = ev.key_message(Key::Character("z".into()), Modifiers::COMMAND);
             assert!(matches!(
                 undo.as_slice(),

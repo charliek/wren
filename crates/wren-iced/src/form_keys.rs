@@ -552,12 +552,22 @@ where
         // claimed.
         let claimed = !self.passive
             && match event {
+                // AltGr's text is no shortcut to the host either.
                 Event::Keyboard(keyboard::Event::KeyPressed {
                     key,
                     physical_key,
                     modifiers,
+                    text,
                     ..
-                }) => crate::keys::shortcut(key, *physical_key, *modifiers).is_some(),
+                }) => {
+                    crate::keys::shortcut(key, *physical_key, *modifiers).is_some()
+                        && !wren_editor::is_alt_graph(
+                            key,
+                            *physical_key,
+                            *modifiers,
+                            text.as_deref(),
+                        )
+                }
                 _ => false,
             };
         'update: {
@@ -648,6 +658,7 @@ where
                         modified_key,
                         physical_key,
                         modifiers,
+                        text,
                         ..
                     }) => {
                         // A character is offered to a row of choices as typed,
@@ -663,10 +674,15 @@ where
                             .map_or(SlotKind::Button, |slot| slot.kind);
                         let typed = !self.typed.borrow().trim().is_empty()
                             || (kind == SlotKind::Owners && self.chosen.get());
-                        let save = self
-                            .save
-                            .as_ref()
-                            .is_some_and(|save| save(key, *physical_key, *modifiers));
+                        let save = self.save.as_ref().is_some_and(|save| {
+                            // AltGr's text is no save key.
+                            !wren_editor::is_alt_graph(
+                                key,
+                                *physical_key,
+                                *modifiers,
+                                text.as_deref(),
+                            ) && save(key, *physical_key, *modifiers)
+                        });
                         match route(kind, routed_key, *modifiers, state.composing, typed, save) {
                             Routed::Pass => {
                                 // The text input reads the modifiers it last
@@ -1150,6 +1166,109 @@ mod tests {
         }
         assert_eq!(captured, [true, false, true, true]);
         assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    /// AltGr's text, which Linux can report as Ctrl+Alt, is the field's
+    /// and no shortcut: the host's copy of it claims nothing, so neither
+    /// does the form.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_graph_text_is_no_claimed_shortcut() {
+        let claims: &'static std::sync::atomic::AtomicUsize =
+            Box::leak(Box::new(std::sync::atomic::AtomicUsize::new(0)));
+        let mut element: Element<'static, Out, Theme, ()> = form_keys(
+            column![text_input("", "").id(IDS[0])],
+            slots(),
+            0,
+            Rc::new(RefCell::new(String::new())),
+            Out::Key,
+        )
+        .claims(claims)
+        .into();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+        );
+        let alt_graph = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Character("e".into()),
+            modified_key: Key::Character("€".into()),
+            physical_key: Physical::Code(Code::KeyE),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+            text: Some("€".into()),
+            repeat: false,
+        });
+        let jump = press(Key::Character("p".into()), Modifiers::ALT, None);
+        for event in [alt_graph, jump] {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+        }
+        assert_eq!(claims.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// With `ctrl+alt+e` a save key, AltGr's `€` types into the field and
+    /// does not save, while a textless Ctrl+Alt+E still does.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn alt_graph_text_is_no_save_key() {
+        let save: SaveKeys = Rc::new(|key: &Key, _, modifiers: Modifiers| {
+            *key == Key::Character("e".into()) && modifiers == Modifiers::CTRL | Modifiers::ALT
+        });
+        let chord = |text: Option<&str>| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character("e".into()),
+                modified_key: Key::Character(text.unwrap_or("e").into()),
+                physical_key: Physical::Code(Code::KeyE),
+                location: Location::Standard,
+                modifiers: Modifiers::CTRL | Modifiers::ALT,
+                text: text.map(Into::into),
+                repeat: false,
+            })
+        };
+        let saves = |event: Event| {
+            let mut element: Element<'static, Out, Theme, ()> = form_keys(
+                column![text_input("", "").id(IDS[0])],
+                slots(),
+                0,
+                Rc::new(RefCell::new(String::new())),
+                Out::Key,
+            )
+            .save_keys(Rc::clone(&save))
+            .into();
+            let mut tree = Tree::new(&element);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+            );
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+            );
+            messages.contains(&key(FormKey::Save))
+        };
+        assert!(!saves(chord(Some("€"))), "AltGr types");
+        assert!(saves(chord(None)), "a textless Ctrl+Alt+E saves");
     }
 
     #[test]
@@ -1806,5 +1925,90 @@ mod tests {
         let owners = 3;
         let messages = owners_batch_at(0, true, owners, None, &[named(Named::Enter)]);
         assert_eq!(messages, [key(FormKey::Accept), typed_text("owners", "")]);
+    }
+
+    /// The form's text fields wrapped as the task form wraps them
+    /// ([`crate::field_keys`]): in Linux's Alt mode, Alt+A, Alt+C and
+    /// Alt+V select, copy and paste in the field with the keyboard, under
+    /// the form's keys, and in Ctrl mode Alt does none of it.
+    // Real iced input on Linux, where its clipboard keys are Ctrl's.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_form_s_fields_take_the_keymap_s_editing_keys() {
+        use crate::field_keys::tests::{chord, linux, Kept};
+        use crate::field_keys::{field_keys, FieldKeys};
+        use wren_core::keybind::LinuxModifier;
+
+        let run = |keys: &FieldKeys, events: &[Event]| {
+            let element = |value: &str| -> Element<'static, Out, Theme, ()> {
+                let content = column![
+                    field_keys(
+                        text_input("", value)
+                            .id(IDS[0])
+                            .width(200)
+                            .on_input(|text: String| Out::Typed(IDS[0], text)),
+                        keys,
+                    ),
+                    field_keys(text_input("", "").id(IDS[1]).width(200), keys),
+                    field_keys(text_input("", "").id(IDS[2]).width(200), keys),
+                    button("Save").on_press(Out::Pressed)
+                ];
+                form_keys(
+                    content,
+                    slots(),
+                    0,
+                    Rc::new(RefCell::new(String::new())),
+                    Out::Key,
+                )
+                .into()
+            };
+            let mut value = String::from("abc");
+            let mut first = element(&value);
+            let mut tree = Tree::new(&first);
+            let node = first.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+            );
+            first.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &(),
+                &mut operation::focusable::focus(Id::new(IDS[0])),
+            );
+            let mut kept = Kept::default();
+            let mut published = Vec::new();
+            for event in events {
+                let mut element = element(&value);
+                element.as_widget_mut().diff(&mut tree);
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &crate::keys::tests::without_alt_text(event),
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &(),
+                    &mut kept,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+                );
+                for message in &messages {
+                    if let Out::Typed(_, text) = message {
+                        value.clone_from(text);
+                    }
+                }
+                published.extend(messages);
+            }
+            (published, kept.0)
+        };
+        let end = press(Key::Named(Named::End), Modifiers::empty(), None);
+        let alt = Modifiers::ALT;
+        let events = [chord("a", alt), chord("c", alt), end, chord("v", alt)];
+        let (published, kept) = run(&linux(LinuxModifier::Alt), &events);
+        assert_eq!(published, [Out::Typed(IDS[0], "abcabc".into())]);
+        assert_eq!(kept.as_deref(), Some("abc"));
+        let (published, kept) = run(&linux(LinuxModifier::Ctrl), &events);
+        assert_eq!((published, kept), (Vec::new(), None));
     }
 }

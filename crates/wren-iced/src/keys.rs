@@ -34,11 +34,17 @@ pub fn input(event: &keyboard::Event) -> Option<Input> {
         key,
         physical_key,
         modifiers,
+        text,
         ..
     } = event
     else {
         return None;
     };
+    // AltGr's text is the focused widget's, whatever its Ctrl+Alt chord is
+    // bound to: the editor, a text field and a board label all type it.
+    if wren_editor::is_alt_graph(key, *physical_key, *modifiers, text.as_deref()) {
+        return None;
+    }
     if let Some(trigger) = shortcut(key, *physical_key, *modifiers) {
         return Some(Input::Accel(trigger));
     }
@@ -382,8 +388,14 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// `event` as the root's filter hands it to the widgets.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn without_alt_text(event: &Event) -> Event {
+        strip_alt_text(event).unwrap_or_else(|| event.clone())
+    }
     use iced::keyboard::key::{Code, Physical};
     use iced::keyboard::Location;
     use wren_core::keybind::parse_trigger;
@@ -542,6 +554,32 @@ mod tests {
             Some("@"),
         ));
         assert!(strip_alt_text(&altgr_like).is_none());
+    }
+
+    /// AltGr's text, which can arrive as Ctrl+Alt off macOS, is no app
+    /// shortcut, so a `ctrl+alt+e` binding never also acts on the press
+    /// the editor, a field or a board label types `€` for.
+    #[test]
+    fn an_altgr_press_that_types_is_no_app_shortcut() {
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        let e = |text: Option<&str>| {
+            input(&press(
+                Key::Character("e".into()),
+                Code::KeyE,
+                ctrl_alt,
+                text,
+            ))
+        };
+        let chord = Some(Input::Accel(
+            wren_core::keybind::parse_trigger("ctrl+alt+e").unwrap(),
+        ));
+        if cfg!(target_os = "macos") {
+            assert_eq!(e(Some("€")), chord);
+        } else {
+            assert_eq!(e(Some("€")), None);
+        }
+        assert_eq!(e(None), chord);
+        assert_eq!(e(Some("\u{5}")), chord);
     }
 
     #[test]

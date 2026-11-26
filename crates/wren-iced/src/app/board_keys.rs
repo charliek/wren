@@ -688,6 +688,30 @@ fn split(heights: &[f32], count: usize) -> Vec<usize> {
 const SHEET_ROW: f32 = 23.0;
 const SHEET_HEADER: f32 = 31.0;
 
+/// Whether a press while the keys sheet is open is the sheet's own key,
+/// read as a focused board reads it, the text it typed included
+/// ([`wren_canvas::resolve`]): it closes the sheet, whatever the layout
+/// types it with and wherever in the sheet the keyboard is, and neither
+/// types nor edits in the filter. Text that only holds the key's
+/// character, `what?` pasted, filters.
+pub(super) fn sheet_toggle(
+    keymap: &Keymap,
+) -> impl Fn(
+    &iced::keyboard::Key,
+    iced::keyboard::key::Physical,
+    iced::keyboard::Modifiers,
+    Option<&str>,
+) -> bool
+       + '_ {
+    move |key, physical, modifiers, text| {
+        let policy = |key: &iced::keyboard::Key, physical, modifiers, repeat| {
+            super::preferences::board_press(keymap, key, physical, modifiers, repeat)
+        };
+        wren_canvas::resolve(&policy, key, physical, modifiers, text, false)
+            == super::preferences::BoardRoute::Command(Command::Keys)
+    }
+}
+
 impl App {
     /// The keys sheet over the board (§3.5): the palette's frame, scrim
     /// and filter, with the rows in as many columns as the window holds,
@@ -712,12 +736,15 @@ impl App {
             )
             .padding([3, 8])
             .style(move |_| chrome::surface(definition, colors.selected, 4.0, false)),
-            text_input("Filter the board's keys…", &palette.query)
-                .id("palette-query")
-                .size(15)
-                .padding([4, 0])
-                .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
-                .style(move |_, status| chrome::input(definition, status, false)),
+            crate::field_keys::field_keys(
+                text_input("Filter the board's keys…", &palette.query)
+                    .id("palette-query")
+                    .size(15)
+                    .padding([4, 0])
+                    .on_input_maybe(self.loading.is_none().then_some(Message::PaletteQuery))
+                    .style(move |_, status| chrome::input(definition, status, false)),
+                &self.preferences.field_keys,
+            ),
             chrome::keycap("esc", definition),
         ]
         .spacing(8)
@@ -846,21 +873,26 @@ impl App {
                 .style(move |_| chrome::scrim(definition)),
         )
         .on_press(Message::PaletteClose);
-        stack![
-            base,
-            opaque(scrim),
-            container(opaque(dialog))
-                .padding(iced::Padding {
-                    top,
-                    right: 16.0,
-                    bottom: 8.0,
-                    left: 16.0
-                })
-                .width(Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .height(Fill)
-        ]
-        .into()
+        // The sheet's own key is the sheet's, ahead of the filter and of
+        // whatever a click inside the sheet left the keyboard to.
+        crate::field_keys::key_owner(
+            stack![
+                base,
+                opaque(scrim),
+                container(opaque(dialog))
+                    .padding(iced::Padding {
+                        top,
+                        right: 16.0,
+                        bottom: 8.0,
+                        left: 16.0
+                    })
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .height(Fill)
+            ],
+            sheet_toggle(&self.preferences.keymap),
+            || Message::PaletteClose,
+        )
     }
 }
 
@@ -873,16 +905,19 @@ pub(super) mod tests {
     use super::*;
     use crate::app::commands::Scope;
 
-    /// The default keymap on `platform`, with the user's `keybind` lines.
+    /// The default keymap on `platform`, in Linux's default Ctrl mode, with
+    /// the user's `keybind` lines.
     pub(in crate::app) fn keymap(platform: Platform, user: &[(&str, &str)]) -> Keymap {
         let user: Vec<(String, String)> = user
             .iter()
             .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
             .collect();
+        let scheme = keybind::Scheme::new(platform, keybind::LinuxModifier::default());
         let (keymap, warnings) = Keymap::build(
-            keybind::default_bindings(platform)
+            scheme,
+            keybind::default_bindings(scheme)
                 .into_iter()
-                .chain(keybind::default_board_bindings(platform)),
+                .chain(keybind::default_board_bindings(scheme)),
             &user,
             |action| {
                 CommandId::parse(action).map(|id| match id.scope() {
@@ -1242,10 +1277,7 @@ pub(super) mod tests {
             keys("Delete selection"),
             Some(vec!["⌫".into(), "Del".into()])
         );
-        assert_eq!(
-            keys("Redo"),
-            Some(vec!["Ctrl+Shift+Z".into(), "Ctrl+Y".into()])
-        );
+        assert_eq!(keys("Redo"), Some(vec!["Ctrl+Shift+Z".into()]));
         assert_eq!(
             keys("Connect in that direction"),
             Some(vec!["Ctrl+Arrow".into()])
@@ -1262,7 +1294,7 @@ pub(super) mod tests {
         assert_eq!(keys("Board keys"), Some(vec!["?".into()]));
         assert_eq!(
             keys("Zoom in, out, to 100 %"),
-            Some(vec!["Alt+=".into(), "Alt+-".into(), "Alt+0".into()])
+            Some(vec!["Ctrl+=".into(), "Ctrl+-".into(), "Ctrl+0".into()])
         );
         assert_eq!(keys("Move copies"), Some(vec!["Ctrl+drag".into()]));
         let jump: Vec<_> = sheet
@@ -1270,7 +1302,7 @@ pub(super) mod tests {
             .filter(|row| row.words == "Jump to node…")
             .map(|row| row.keys.clone())
             .collect();
-        assert_eq!(jump, [vec!["Alt+F".to_owned(), "Alt+Shift+O".to_owned()]]);
+        assert_eq!(jump, [vec!["Ctrl+F".to_owned(), "Ctrl+Shift+O".to_owned()]]);
         // No default key: the two unlettered tools, align, distribute and
         // the fills are left out until a key is bound.
         for words in [
@@ -1336,6 +1368,38 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_sheet_s_key_rebound_onto_a_clipboard_chord_is_the_sheet_s() {
+        use iced::keyboard::key::{Code, Physical};
+        use iced::keyboard::{Key, Modifiers};
+        use wren_core::keybind::{LinuxModifier, Logical, Scheme};
+        // `keybind = mod+x = board.keys`: in the filter Mod+X closes the
+        // sheet, and is no Cut.
+        for scheme in crate::app::preferences::SCHEMES {
+            let user = [("mod+x".to_owned(), "board.keys".to_owned())];
+            let (keymap, _) = crate::app::preferences::build_keymap(scheme, &user, false);
+            let toggle = sheet_toggle(&keymap);
+            let held = match scheme.modifier(Logical::Mod) {
+                "super" => Modifiers::LOGO,
+                "ctrl" => Modifiers::CTRL,
+                _ => Modifiers::ALT,
+            };
+            let x = Physical::Code(Code::KeyX);
+            assert!(
+                toggle(&Key::Character("x".into()), x, held, None),
+                "{scheme:?}"
+            );
+            if scheme == Scheme::new(Platform::Linux, LinuxModifier::Alt) {
+                assert!(!toggle(
+                    &Key::Character("x".into()),
+                    x,
+                    Modifiers::CTRL,
+                    None
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn the_footer_hint_follows_the_board_its_focus_and_the_setting() {
         let (_directory, mut app) = fixture();
         open_board(&mut app, "Flow");
@@ -1394,8 +1458,38 @@ pub(super) mod tests {
         assert_eq!(dimmed(&app, "Select all"), Some(false));
         assert_eq!(dimmed(&app, "Rectangle tool"), Some(false));
 
-        // `?` in the filter closes it, and the board has the keyboard.
-        let _ = app.palette_query("?".into());
+        // Text in the filter filters, a `?` in it too: only the sheet's
+        // key, pressed in the filter, closes it.
+        let _ = app.palette_query("what?".into());
+        assert!(sheet_open(&app));
+        {
+            use iced::keyboard::key::{Code, Physical};
+            use iced::keyboard::{Key, Modifiers};
+            let toggle = sheet_toggle(&app.preferences.keymap);
+            let slash = Physical::Code(Code::Slash);
+            let shift = Modifiers::SHIFT;
+            assert!(toggle(&Key::Character("?".into()), slash, shift, Some("?")));
+            assert!(toggle(&Key::Character("/".into()), slash, shift, None));
+            assert!(!toggle(
+                &Key::Character("/".into()),
+                slash,
+                Modifiers::empty(),
+                Some("/")
+            ));
+            // A German layout types `?` with Shift and ß: the text says so,
+            // as it does to a focused board.
+            let minus = Physical::Code(Code::Minus);
+            assert!(toggle(&Key::Character("?".into()), minus, shift, Some("?")));
+            assert!(!toggle(&Key::Character("?".into()), minus, shift, None));
+            assert!(!toggle(
+                &Key::Character("v".into()),
+                Physical::Code(Code::KeyV),
+                Modifiers::COMMAND,
+                None
+            ));
+        }
+        // Closed, the board has the keyboard.
+        let _ = app.update(Message::PaletteClose);
         assert!(app.palette.is_none());
         assert_eq!(app.column, super::super::columns::Column::Editor);
 
@@ -1435,6 +1529,68 @@ pub(super) mod tests {
         assert_eq!(dimmed(&app, "Hand tool"), Some(false));
     }
 
+    /// discovery/keybindings.md §2 item 2: the hint line, the keys sheet,
+    /// the style bar and the footer name the command key of the mode
+    /// `config.conf` gives, and a change of mode reaches them as soon as the
+    /// settings are applied. macOS ignores the setting.
+    #[test]
+    fn the_board_s_key_labels_follow_the_command_key_mode() {
+        let directory = crate::test_support::tempdir();
+        let path = directory.path().join("config.conf");
+        let (_workspace, mut app) = fixture();
+        std::fs::write(&path, "boards = on\nlinux-modifier = ctrl\n").unwrap();
+        app.preferences = super::super::preferences::Preferences::load(Some(path.clone()));
+        app.preferences.boards = true;
+        app.apply_preferences();
+        open_board(&mut app, "Flow");
+        focus(&mut app);
+        let _ = run(&mut app, Command::Select(Dir::Down));
+        app.style_menu = Some(super::super::board_style_bar::Menu::More);
+        let shown = |app: &App| {
+            let hint = app.board_hint();
+            let connect = hint.iter().find(|segment| segment.words == "connect");
+            let sheet = app.board_sheet("");
+            let redo = sheet.iter().find(|row| row.words == "Redo");
+            let bar = app.board_style_bar().expect("a style bar");
+            let (_, more) = bar.menu.expect("the More menu");
+            let duplicate = more.iter().find(|row| row.command == Command::Duplicate);
+            (
+                connect.map(|segment| segment.keys.clone()),
+                redo.and_then(|row| row.keys.first().cloned()),
+                duplicate.and_then(|row| row.key.clone()),
+                app.board_footer_controls()[0].tip(),
+            )
+        };
+        let labels = |command: &str| {
+            let owned = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+            match Platform::current() {
+                Platform::Mac => (
+                    Some(owned(&["⌘Arrow"])),
+                    Some("⇧⌘Z".to_owned()),
+                    Some("⌘D".to_owned()),
+                    "Undo   ⌘Z".to_owned(),
+                ),
+                Platform::Linux => (
+                    Some(owned(&[&format!("{command}+Arrow")])),
+                    Some(format!("{command}+Shift+Z")),
+                    Some(format!("{command}+D")),
+                    format!("Undo   {command}+Z"),
+                ),
+            }
+        };
+        assert_eq!(shown(&app), labels("Ctrl"));
+        std::fs::write(&path, "boards = on\nlinux-modifier = alt\n").unwrap();
+        let _ = app.reload_settings(false);
+        let alt = labels("Alt");
+        assert_eq!(shown(&app), alt);
+        // In Alt mode the Ctrl version of redo is listed after Alt's.
+        if Platform::current() == Platform::Linux {
+            let sheet = app.board_sheet("");
+            let redo = sheet.iter().find(|row| row.words == "Redo").unwrap();
+            assert_eq!(redo.keys, ["Alt+Shift+Z", "Ctrl+Shift+Z"]);
+        }
+    }
+
     #[test]
     fn a_rebound_sheet_key_closes_the_sheet() {
         let (_directory, mut app) = fixture();
@@ -1444,9 +1600,26 @@ pub(super) mod tests {
         focus(&mut app);
         let _ = run(&mut app, Command::Keys);
         assert!(sheet_open(&app));
+        // The sheet takes the key from what is in it and closes.
+        {
+            use iced::keyboard::key::{Code, Named, Physical};
+            use iced::keyboard::{Key, Modifiers};
+            let toggle = sheet_toggle(&app.preferences.keymap);
+            assert!(toggle(
+                &Key::Named(Named::F1),
+                Physical::Code(Code::F1),
+                Modifiers::empty(),
+                None
+            ));
+        }
+        let _ = app.update(Message::PaletteClose);
+        assert!(app.palette.is_none());
+        // The app's copy of the press that opened it on the board leaves
+        // it open.
+        let _ = run(&mut app, Command::Keys);
         let f1 = wren_core::keybind::parse_trigger("f1").unwrap();
         let _ = app.update(Message::Key(Input::Accel(f1)));
-        assert!(app.palette.is_none());
+        assert!(sheet_open(&app));
     }
 
     #[test]

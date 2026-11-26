@@ -18,6 +18,7 @@ use crate::chrome::{self, Icon};
 use crate::drag::RowKind;
 use crate::drag_view::Registry;
 use crate::ellipsis::ellipsis;
+use crate::field_keys::field_keys;
 use crate::layers::layers;
 use crate::panes::{self, Pane};
 use crate::{fonts, theme};
@@ -421,6 +422,7 @@ impl App {
             },
             ..container::Style::default()
         });
+        let input = field_keys(input, &self.preferences.field_keys);
         container(stack![backdrop, input])
             .padding(iced::Padding {
                 top: 0.0,
@@ -918,13 +920,16 @@ impl App {
         );
         let find = container(
             row![
-                text_input("Find literal text", &self.find_query)
-                    .id("find-query")
-                    .on_input(Message::FindChanged)
-                    .on_submit(Message::FindNext)
-                    .size(12)
-                    .padding(6)
-                    .style(move |_, status| chrome::input(self.definition, status, true)),
+                field_keys(
+                    text_input("Find literal text", &self.find_query)
+                        .id("find-query")
+                        .on_input(Message::FindChanged)
+                        .on_submit(Message::FindNext)
+                        .size(12)
+                        .padding(6)
+                        .style(move |_, status| chrome::input(self.definition, status, true)),
+                    &self.preferences.field_keys,
+                ),
                 text(format!(
                     "{} / {}",
                     self.editor.find_current().map_or(0, |n| n + 1),
@@ -1312,14 +1317,15 @@ impl App {
             });
             content = content.push(text(format!("This item contains {count} {}. It will move to the operating system trash, not be permanently deleted. Use the button below to confirm; Return alone never confirms.", if count == 1 { "note" } else { "notes" })).size(13).color(theme::color(colors.muted)));
         } else {
-            content = content.push(
+            content = content.push(field_keys(
                 text_input("Name", &dialog.name)
                     .id("item-name")
                     .on_input(Message::DialogName)
                     .on_submit(Message::SubmitDialog)
                     .padding(9)
                     .style(move |_, status| chrome::input(self.definition, status, true)),
-            );
+                &self.preferences.field_keys,
+            ));
             if let DialogKind::CreateNote(_, chosen) = dialog.kind {
                 if self.preferences.boards {
                     content = content.push(self.kind_pills(chosen));

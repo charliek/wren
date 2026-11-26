@@ -20,7 +20,7 @@ from tools.wrentest.boards import (
 from tools.wrentest.test_board_view import column, moved, samples, wait_focus  # noqa: F401  (fixture)
 from tools.wrentest.test_editor import xdo
 from tools.wrentest.test_gestures import move, point_in
-from tools.wrentest.ui import wait_for
+from tools.wrentest.ui import native_mod, native_opt, wait_for
 
 # Past the wheel's 150 ms burst, so the next click starts its own.
 BURST = 0.3
@@ -367,8 +367,8 @@ def test_native_board_keys(samples) -> None:
         xdo("key", "Escape")
         settled(app, lambda state: state["tool"] == "select", "Escape put it away")
 
-        xdo("key", "alt+Right")
-        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        xdo("key", native_opt("Right"))
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Opt+Right moved it")
         xdo("key", "ctrl+z")
         settled(app, lambda state: at_of(app, RECEIVE) == [0, 120], "Ctrl+Z undid it")
 
@@ -377,12 +377,12 @@ def test_native_board_keys(samples) -> None:
         assert state["counts"] == {"nodes": 16, "edges": 18}, state
         xdo("key", "Escape")
         settled(app, lambda state: state["state"] == "idle", "Escape committed it")
-        # The slot right of Start is free, so Ctrl+Right makes a shape there.
+        # The slot right of Start is free, so Mod+Right makes a shape there.
         move(window, screen_of(bounds(app), START))
         xdo("click", "1")
         settled(app, lambda state: state["selection"] == [START], "Start selected")
-        xdo("key", "ctrl+Right")
-        state = settled(app, lambda state: state["state"] == "editing", "Ctrl+Right made a shape")
+        xdo("key", native_mod("Right"))
+        state = settled(app, lambda state: state["state"] == "editing", "Mod+Right made a shape")
         assert state["counts"] == {"nodes": 17, "edges": 19}, state
         made = state["selection"]
         xdo("key", "Escape")
@@ -403,13 +403,75 @@ def test_native_board_keys(samples) -> None:
 
 
 @pytest.mark.native_x11
+@pytest.mark.parametrize("mode", ["ctrl", "alt"])
+def test_native_mod_keys_undo_a_label_and_copy_a_node(samples, mode: str) -> None:
+    """discovery/keybindings.md §2 items 3 and 4, with the real keys of each
+    ``linux-modifier``: in an open label Mod+Z undoes the typing,
+    Mod+Shift+Z redoes it, and Mod+A then Mod+C copy its text; on the board
+    Mod+C and Mod+V copy and paste a node. Ctrl+Y redoes nothing: in Alt
+    mode it does nothing, and in Ctrl mode it is Focus mode, which leaves
+    the label open with its redo."""
+    def chord(key: str) -> str:
+        return f"{mode}+{key}"
+
+    def focus() -> bool:
+        return app.client.call("navigation.get")["focus"]
+
+    with board_app(samples, f"board-native-mod-{mode}", more=f"linux-modifier = {mode}\n") as app:
+        window, placed = native_board(app)
+        move(window, screen_of(placed, PACK))
+        xdo("click", "--repeat", "2", "--delay", "80", "1")
+        settled(app, lambda state: state["state"] == "editing", "the label open")
+        xdo("type", "--delay", "20", "Boxed")
+        settled(app, lambda state: state["editing"]["text"] == "Boxed", "the typing")
+        xdo("key", chord("z"))
+        settled(app, lambda state: state["editing"]["text"] == "Pack", "Mod+Z undid the typing")
+        assert not focus()
+        xdo("key", "ctrl+y")
+        if mode == "ctrl":
+            wait_for(focus, timeout=5, interval=0.025, description="Ctrl+Y turned on Focus mode")
+        else:
+            time.sleep(BURST)
+            assert not focus()
+        state = board(app)
+        assert (state["state"], state["editing"]["text"]) == ("editing", "Pack"), state
+        xdo("key", chord("shift+z"))
+        settled(app, lambda state: state["editing"]["text"] == "Boxed", "Mod+Shift+Z redid it")
+        if mode == "ctrl":
+            xdo("key", "ctrl+y")
+            wait_for(lambda: not focus(), timeout=5, interval=0.025,
+                     description="Ctrl+Y turned Focus mode off")
+            assert board(app)["editing"]["text"] == "Boxed"
+        app.client.call("clipboard.write", {"text": "probe"})
+        wait_for(lambda: app.client.call("clipboard.read") == "probe", timeout=5, interval=0.05,
+                 description="the clipboard")
+        xdo("key", chord("a"))
+        xdo("key", chord("c"))
+        wait_for(lambda: app.client.call("clipboard.read") == "Boxed", timeout=5, interval=0.05,
+                 description="Mod+A, Mod+C copied the label's text")
+        xdo("key", "Escape")
+        state = settled(app, lambda state: state["state"] == "idle", "the label committed")
+        assert next(n for n in state["nodes"] if n["id"] == PACK)["text"] == "Boxed"
+        assert state["selection"] == [PACK], state
+        nodes = state["counts"]["nodes"]
+        xdo("key", chord("c"))
+        wait_for(lambda: app.client.call("clipboard.read").startswith("# wren-board fragment 1"),
+                 timeout=5, interval=0.05, description="Mod+C copied the node")
+        xdo("key", chord("v"))
+        settled(app, lambda state: state["counts"]["nodes"] == nodes + 1, "Mod+V pasted it")
+        xdo("key", chord("z"))
+        settled(app, lambda state: state["counts"]["nodes"] == nodes, "Mod+Z took the paste back")
+        assert column(app) == "editor"
+
+
+@pytest.mark.native_x11
 def test_native_a_letter_in_the_palette_arms_nothing(samples) -> None:
     with board_app(samples, "board-native-palette") as app:
         window, placed = native_board(app)
         move(window, point_in(placed["root"]))
         xdo("click", "1")
         wait_focus(app, ["note-editor"])
-        xdo("key", "alt+shift+p")
+        xdo("key", native_mod("shift+p"))
         wait_focus(app, ["palette-query"])
         xdo("type", "--delay", "20", "rdo")
         wait_for(lambda: app.client.call("navigation.get")["modal"]["query"] == "rdo", timeout=3,
@@ -481,7 +543,7 @@ def test_native_keys_build_the_first_four_nodes_of_the_acceptance_script(samples
         typed("Receive order")
         xdo("key", "--delay", "0", "Escape", "d", "Tab")
         typed("Valid?")
-        xdo("key", "--delay", "0", "Escape", "ctrl+Right")
+        xdo("key", "--delay", "0", "Escape", native_mod("Right"))
         typed("Reject order")
         xdo("key", "Escape")
         state = settled(app, lambda state: state["state"] == "idle", "the last label committed")
@@ -515,6 +577,6 @@ def test_native_a_refused_paste_leaves_the_board_the_keyboard(samples) -> None:
         xdo("key", "ctrl+v")
         wait_for(lambda: app.client.call("session.get")["banner"], timeout=5, interval=0.025,
                  description="the refused paste's notice")
-        xdo("key", "alt+Right")
-        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Alt+Right moved it")
+        xdo("key", native_opt("Right"))
+        settled(app, lambda state: at_of(app, RECEIVE) == [20, 120], "Opt+Right moved it")
         wait_focus(app, ["note-editor"])

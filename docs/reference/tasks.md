@@ -171,7 +171,8 @@ about 440 px it is not shown. Both engines show it.
 
 ### Toggle a task
 
-**Toggle a task** (⌘↵ on macOS, Ctrl+Enter on Linux) is the done toggle.
+**Toggle a task** (⌘↵ on macOS, Mod+Enter on Linux, where Mod is Ctrl unless
+[`linux-modifier`](configuration.md#settings) says Alt) is the done toggle.
 An open, doing or unknown task becomes done and gets `✅` and today's date.
 A done or cancelled task becomes open and loses its `✅` and `❌`, so
 reopening a cancelled task clears its cancellation date.
@@ -228,7 +229,7 @@ advanced engine.
 
 ### The calendar
 
-**Set task due date** (⌘D / Ctrl+D) opens a calendar under the date, or
+**Set task due date** (⌘D / Mod+D) opens a calendar under the date, or
 the caret, on the `advanced` engine. It opens on the task's due date, or
 today. Type a [date word](#date-words), or move with the arrow keys and PgUp and
 PgDn, and press ↵ to write the date. A click on a day or on a quick pick
@@ -279,7 +280,7 @@ open indents as before.
 
 ### The task form
 
-**Create or edit task** (⇧⌘↵ / Ctrl+Shift+Enter, or **Edit task…** in the
+**Create or edit task** (⇧⌘↵ / Mod+Shift+Enter, or **Edit task…** in the
 task menu) opens a form for the line at the caret, on either engine. It has
 the description, status, due date, priority and owners, and shows the
 Markdown it will write.

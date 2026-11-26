@@ -533,6 +533,326 @@ fn a_board_key_reads_the_keymap_the_app_reads() {
     );
 }
 
+/// A chord pressed on the focused board, as the widget publishes it; an
+/// arrow is named by `"left"`, `"right"`, `"up"` or `"down"`.
+fn chord(app: &mut App, name: &str, modifiers: iced::keyboard::Modifiers) {
+    use iced::keyboard::key::{Code, Named, Physical};
+    use iced::keyboard::Key;
+    let (key, code) = match name {
+        "left" => (Key::Named(Named::ArrowLeft), Code::ArrowLeft),
+        "right" => (Key::Named(Named::ArrowRight), Code::ArrowRight),
+        "up" => (Key::Named(Named::ArrowUp), Code::ArrowUp),
+        "down" => (Key::Named(Named::ArrowDown), Code::ArrowDown),
+        "a" => (Key::Character("a".into()), Code::KeyA),
+        "c" => (Key::Character("c".into()), Code::KeyC),
+        "d" => (Key::Character("d".into()), Code::KeyD),
+        "v" => (Key::Character("v".into()), Code::KeyV),
+        "x" => (Key::Character("x".into()), Code::KeyX),
+        "y" => (Key::Character("y".into()), Code::KeyY),
+        "z" => (Key::Character("z".into()), Code::KeyZ),
+        _ => panic!("no key {name}"),
+    };
+    let epoch = view(app).epoch();
+    let press = wren_canvas::KeyPress {
+        key,
+        physical: Physical::Code(code),
+        modifiers,
+        text: None,
+        repeat: false,
+        held: true,
+    };
+    let _ = app.update(Message::Board(Sent::Key(epoch, press)));
+}
+
+/// Select `pack` alone, by a click on empty canvas and one on it, which
+/// is no double click.
+fn reselect(app: &mut App) {
+    click_at(app, EMPTY);
+    click(app, "pack");
+}
+
+/// discovery/keybindings.md §2 items 1, 3 and 4, end to end through the
+/// app in each scheme: on a board Mod+arrow connects and the other key
+/// with an arrow moves, Mod+D duplicates, Mod+A selects all, Mod+C, X and
+/// V are the clipboard's, and Mod+Z and Mod+Shift+Z undo and redo, on the
+/// board and in an open label (on macOS, only the Mac scheme's label
+/// keys, which are its fixed chords). In Alt mode the Ctrl versions of the
+/// clipboard, select all and undo keys work too. Ctrl+Y redoes nothing.
+#[test]
+fn the_board_and_its_label_keys_follow_the_command_key_in_each_scheme() {
+    use iced::keyboard::Modifiers;
+    use wren_core::keybind::{LinuxModifier, Logical, Platform};
+    let held = |scheme: wren_core::keybind::Scheme, token| match scheme.modifier(token) {
+        "super" => Modifiers::LOGO,
+        "ctrl" => Modifiers::CTRL,
+        _ => Modifiers::ALT,
+    };
+    for scheme in super::preferences::SCHEMES {
+        let (modifier, opt) = (held(scheme, Logical::Mod), held(scheme, Logical::Opt));
+        let shifted = modifier | Modifiers::SHIFT;
+        let alt_mode = scheme.platform == Platform::Linux && scheme.linux == LinuxModifier::Alt;
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        app.preferences.keymap = super::preferences::build_keymap(scheme, &[], false).0;
+        app.apply_preferences();
+        lay_out(&mut app);
+        let nodes = |app: &App| view(app).board().nodes.len();
+        let edges = |app: &App| view(app).board().edges.len();
+
+        // On the board.
+        reselect(&mut app);
+        chord(&mut app, "d", modifier);
+        assert_eq!(nodes(&app), 3, "{scheme:?}: Mod+D duplicates");
+        chord(&mut app, "z", modifier);
+        assert_eq!(nodes(&app), 2, "{scheme:?}: Mod+Z undoes");
+        chord(&mut app, "z", shifted);
+        assert_eq!(nodes(&app), 3, "{scheme:?}: Mod+Shift+Z redoes");
+        chord(&mut app, "z", modifier);
+        let revision = app.board_revision;
+        for ctrl_y in [Modifiers::CTRL, modifier] {
+            chord(&mut app, "y", ctrl_y);
+            assert_eq!(nodes(&app), 2, "{scheme:?}: {ctrl_y:?}+Y redoes nothing");
+        }
+        assert_eq!(app.board_revision, revision, "{scheme:?}");
+        reselect(&mut app);
+        let before = at(&app, "pack");
+        chord(&mut app, "right", opt);
+        assert_ne!(at(&app, "pack"), before, "{scheme:?}: Opt+→ moves");
+        chord(&mut app, "z", modifier);
+        reselect(&mut app);
+        chord(&mut app, "right", modifier);
+        assert_eq!(
+            (nodes(&app), edges(&app)),
+            (3, 2),
+            "{scheme:?}: Mod+→ connects"
+        );
+        let _ = app.update(Message::Board(Sent::Input(
+            view(&app).epoch(),
+            Input::Key {
+                key: wren_canvas::Key::Escape,
+                repeat: false,
+            },
+        )));
+        chord(&mut app, "z", modifier);
+        assert_eq!((nodes(&app), edges(&app)), (2, 1), "{scheme:?}");
+        chord(&mut app, "a", modifier);
+        assert_eq!(
+            view(&app).machine().selection().len(),
+            3,
+            "{scheme:?}: Mod+A selects every element"
+        );
+        // The clipboard's keys are the board's copy, cut and paste.
+        let board_keys: &[Modifiers] = if alt_mode {
+            &[modifier, Modifiers::CTRL]
+        } else {
+            &[modifier]
+        };
+        let read = |app: &App, letter: &str, modifiers| {
+            use iced::keyboard::key::{Code, Physical};
+            let code = match letter {
+                "c" => Code::KeyC,
+                "x" => Code::KeyX,
+                _ => Code::KeyV,
+            };
+            view(app).key(
+                &iced::keyboard::Key::Character(letter.into()),
+                Physical::Code(code),
+                modifiers,
+                None,
+                false,
+                false,
+            )
+        };
+        for &each in board_keys {
+            let epoch = view(&app).epoch();
+            for (letter, command) in [("c", C::Copy), ("x", C::Cut), ("v", C::Paste)] {
+                assert_eq!(
+                    read(&app, letter, each),
+                    Some(vec![Sent::Command(epoch, command)]),
+                    "{scheme:?}: {each:?}+{letter}"
+                );
+            }
+            chord(&mut app, "x", each);
+            assert_eq!(nodes(&app), 0, "{scheme:?}: {each:?}+X cuts");
+            chord(&mut app, "z", modifier);
+            assert_eq!(nodes(&app), 2, "{scheme:?}");
+        }
+
+        // In a label. On macOS a label keeps its fixed ⌘ chords, so a
+        // Linux scheme's keys are not its own there.
+        if cfg!(target_os = "macos") && scheme.platform == Platform::Linux {
+            continue;
+        }
+        for &each in board_keys {
+            click_at(&mut app, EMPTY);
+            relabel(&mut app, "pack", "Ship");
+            let text = |app: &App| view(app).label().map(|label| label.text().to_owned());
+            chord(&mut app, "z", each);
+            assert_eq!(
+                text(&app).as_deref(),
+                Some("Pack"),
+                "{scheme:?}: {each:?}+Z"
+            );
+            for ctrl_y in [Modifiers::CTRL, modifier] {
+                chord(&mut app, "y", ctrl_y);
+                assert_eq!(
+                    text(&app).as_deref(),
+                    Some("Pack"),
+                    "{scheme:?}: {ctrl_y:?}+Y"
+                );
+            }
+            chord(&mut app, "z", each | Modifiers::SHIFT);
+            assert_eq!(
+                text(&app).as_deref(),
+                Some("Ship"),
+                "{scheme:?}: {each:?}+Shift+Z"
+            );
+            chord(&mut app, "a", each);
+            label(&mut app, LabelAction::Insert("Go".into()));
+            assert_eq!(text(&app).as_deref(), Some("Go"), "{scheme:?}: {each:?}+A");
+            // Copy, cut and paste are the label's, not the board's.
+            let epoch = view(&app).epoch();
+            let label_keys = [
+                ("c", LabelAction::Copy),
+                ("x", LabelAction::Cut),
+                ("v", LabelAction::Paste),
+            ];
+            for (letter, action) in label_keys {
+                assert_eq!(
+                    read(&app, letter, each),
+                    Some(vec![Sent::Label(epoch, action)]),
+                    "{scheme:?}: {each:?}+{letter}"
+                );
+            }
+            // A held paste pastes again in a label, though not on the board.
+            let held_v = |app: &App| {
+                use iced::keyboard::key::{Code, Physical};
+                view(app).key(
+                    &iced::keyboard::Key::Character("v".into()),
+                    Physical::Code(Code::KeyV),
+                    each,
+                    None,
+                    true,
+                    false,
+                )
+            };
+            assert_eq!(
+                held_v(&app),
+                Some(vec![Sent::Label(epoch, LabelAction::Paste)]),
+                "{scheme:?}: held {each:?}+V"
+            );
+            assert_eq!(key(&mut app, C::CommitLabel), Disposition::Completed);
+            assert_eq!(
+                held_v(&app),
+                Some(Vec::new()),
+                "{scheme:?}: held {each:?}+V"
+            );
+            chord(&mut app, "z", modifier);
+        }
+    }
+}
+
+/// A keymap of `scheme`'s defaults with the user's `keybind` lines, given
+/// to the app and its open board.
+fn bind(app: &mut App, scheme: wren_core::keybind::Scheme, user: &[(&str, &str)]) {
+    let user: Vec<(String, String)> = user
+        .iter()
+        .map(|(trigger, action)| ((*trigger).to_owned(), (*action).to_owned()))
+        .collect();
+    let (keymap, warnings) = super::preferences::build_keymap(scheme, &user, false);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.preferences.keymap = keymap;
+    app.apply_preferences();
+}
+
+/// Branch review, severity 3: with `ctrl+alt+e = view.focus`, AltGr+E,
+/// which arrives as Ctrl+Alt+E typing `€` on some Linux layouts, types in
+/// an open label in either mode, and the app's copy of the press does
+/// not toggle Focus mode; a real Ctrl+Alt+E still does.
+#[test]
+fn altgr_text_types_in_a_label_whatever_app_command_its_chord_is() {
+    use iced::keyboard::key::{Code, Physical};
+    use iced::keyboard::{Key, Modifiers};
+    use wren_core::keybind::{LinuxModifier, Platform, Scheme};
+    let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+    let event = |text: Option<&str>| iced::keyboard::Event::KeyPressed {
+        key: Key::Character("e".into()),
+        modified_key: Key::Character(text.unwrap_or("e").into()),
+        physical_key: Physical::Code(Code::KeyE),
+        location: iced::keyboard::Location::Standard,
+        modifiers: ctrl_alt,
+        text: text.map(Into::into),
+        repeat: false,
+    };
+    for linux in [LinuxModifier::Ctrl, LinuxModifier::Alt] {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        bind(
+            &mut app,
+            Scheme::new(Platform::Linux, linux),
+            &[("ctrl+alt+e", "view.focus")],
+        );
+        lay_out(&mut app);
+        relabel(&mut app, "pack", "Ship");
+        let epoch = view(&app).epoch();
+        let press = wren_canvas::KeyPress {
+            key: Key::Character("e".into()),
+            physical: Physical::Code(Code::KeyE),
+            modifiers: ctrl_alt,
+            text: Some("€".into()),
+            repeat: false,
+            held: true,
+        };
+        let _ = app.update(Message::Board(Sent::Key(epoch, press)));
+        // What the app's keyboard subscription makes of the same press.
+        if let Some(input) = crate::keys::input(&event(Some("€"))) {
+            let _ = app.update(Message::Key(input));
+        }
+        let text = view(&app).label().map(|label| label.text().to_owned());
+        if cfg!(target_os = "macos") {
+            continue;
+        }
+        assert_eq!(text.as_deref(), Some("Ship€"), "{linux:?}");
+        assert!(!app.focus, "{linux:?}");
+        // A Ctrl+Alt+E that types nothing is the app's chord.
+        let input = crate::keys::input(&event(None)).expect("the chord");
+        let _ = app.update(Message::Key(input));
+        assert!(app.focus, "{linux:?}");
+    }
+}
+
+/// Branch review, severity 4: on macOS a label keeps its fixed ⌘ chords
+/// whatever the board layer binds, as before the command-key work: with
+/// `super+z = board.unbind`, or ⌘Z rebound to another board command, ⌘Z
+/// still undoes the label's typing.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_a_label_keeps_command_z_whatever_the_board_layer_binds() {
+    use iced::keyboard::Modifiers;
+    use wren_core::keybind::{LinuxModifier, Platform, Scheme};
+    let mac = Scheme::new(Platform::Mac, LinuxModifier::default());
+    for user in [
+        &[("super+z", "board.unbind")][..],
+        &[("super+z", "board.copy")][..],
+        &[("super+z", "board.unbind"), ("super+u", "board.undo")][..],
+    ] {
+        let (_directory, mut app) = fixture();
+        open_board(&mut app, "Flow");
+        bind(&mut app, mac, user);
+        lay_out(&mut app);
+        click_at(&mut app, EMPTY);
+        relabel(&mut app, "pack", "Ship");
+        let text = |app: &App| view(app).label().map(|label| label.text().to_owned());
+        chord(&mut app, "z", Modifiers::LOGO);
+        assert_eq!(text(&app).as_deref(), Some("Pack"), "{user:?}: ⌘Z");
+        chord(&mut app, "z", Modifiers::LOGO | Modifiers::SHIFT);
+        assert_eq!(text(&app).as_deref(), Some("Ship"), "{user:?}: ⇧⌘Z");
+        chord(&mut app, "a", Modifiers::LOGO);
+        label(&mut app, LabelAction::Insert("Go".into()));
+        assert_eq!(text(&app).as_deref(), Some("Go"), "{user:?}: ⌘A");
+    }
+}
+
 /// Exit criterion 3 of Phase 2: a board's draft has one sender. Outside
 /// the tests, the app builds `Op::EditDraft` in two places: the editor's
 /// `text_changed`, which returns early on a board, and `board_changed`.

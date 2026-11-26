@@ -1334,7 +1334,7 @@ mod tests {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
         let keybinds = vec![("alt+shift+s".to_owned(), "task.set_status".to_owned())];
         let (keymap, warnings) = super::super::preferences::build_keymap(
-            wren_core::keybind::Platform::current(),
+            wren_core::keybind::Scheme::default(),
             &keybinds,
             true,
         );
@@ -1537,7 +1537,7 @@ mod tests {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
         let keybinds = vec![("alt+shift+s".to_owned(), "task.set_status".to_owned())];
         let (keymap, _) = super::super::preferences::build_keymap(
-            wren_core::keybind::Platform::current(),
+            wren_core::keybind::Scheme::default(),
             &keybinds,
             true,
         );
