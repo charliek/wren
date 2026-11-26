@@ -1,6 +1,6 @@
 # Keybindings: one switchable command key on Linux
 
-Status: planned (2026-11-25). Owner decisions are in §2. The build is §5.
+Status: built on branch `linux-mod` (2026-11-25). Owner decisions are in §2, the build in §5, and what changed in the building in §6.
 
 ## 1. What changes and why
 
@@ -86,7 +86,7 @@ Existing tests keep their expectations except where a decision above changes the
 | K3 Board | Opus | sol | Board tables on `mod`/`opt`; Ctrl+Y redo removed; the label editor's clipboard and select-all from the key policy; pointer modifiers stay as they are, documented. |
 | K4 Tests | Sonnet | sol | The harness pins the mode; `tools/wrentest/test_keys_modifier.py` covers both modes, the live switch, Alt+C/V/A in the editor, palette, calendar and form in Alt mode, and native X11 chords in each mode; existing files keep running in Alt mode. |
 | K5 Docs | Sonnet | sol | `docs/getting-started/keybindings.md` rewritten around Mod (macOS column, Linux "Mod" column, the switch at the top, the exceptions); `docs/reference/configuration.md` (`linux-modifier`); `CLAUDE.md` architecture rule; `docs/development/architecture.md`; the tasks docs (⌘D / Mod+D …); `CHANGELOG.md` under Unreleased, with the new Linux default and the Ctrl+Y change prominent. |
-| K6 Finish | — | astra (branch) | One Codex review of the branch; the full matrix (X11 and Wayland × wgpu and tiny-skia, lanes one at a time) in the harness's pinned mode, plus the Ctrl-mode file; the Mac Metal scenes and macOS clippy (Mac defaults unchanged; check ⌘D against the Board menu). Open the PR, watch it green, and **stop for the owner** before merging. |
+| K6 Finish | — | astra (branch) and a Fable judge | One branch review by both, in parallel, then one fix round. Verification: CI's four display lanes in the harness's pinned Alt mode, one local full X11 run in Ctrl mode, macOS clippy and one Mac check (Mac defaults unchanged; check ⌘D against the Board menu). Open the PR, watch it green, and merge it as a merge commit (the owner authorised auto-merge). |
 
 Stop conditions, as in `discovery/tasks-build.md` §9:
 - a change to Mac defaults;
@@ -94,3 +94,24 @@ Stop conditions, as in `discovery/tasks-build.md` §9:
 - two failed fix rounds on one item;
 - CI failing twice for no known reason;
 - a touch to `vendor/` or golden files.
+
+## 6. As built
+
+The owner approved a faster run on 2026-11-25:
+- K2, K3 and K5 were built in parallel worktrees;
+- K4 was folded into K1 (the harness pin) and K2 (`test_keys_modifier.py`);
+- each item had one Codex review, with a second only for severity 4 or more;
+- the final verification is CI plus one local run in Ctrl mode.
+
+What differs from §3 and §4:
+- **Word motion.** On Linux it is Ctrl+←/→ only; Alt+←/→ was never bound. Alt+Backspace and Alt+Delete still delete a word.
+- **`edit.*` is Linux only.** On macOS the editor keeps its own ⌘Z, ⌘⇧Z and ⌘F, and a `keybind` line naming an `edit.*` action is refused. The palette rows are hidden.
+- **Unbound and reassigned clipboard chords.** An explicitly unbound Ctrl+C/X/V/A does nothing, in the editor and in a focused field. One given to another command does only that command.
+- **Text fields have no undo.** iced's text input has none, so Alt+Z and Ctrl+Z do nothing there. The wrapper rewrites keys only in Alt mode.
+- **Ctrl+Y in Ctrl mode is Focus mode,** on a board too, where an open label stays open.
+- **Board labels.** The board's select all, copy, cut, paste, undo and redo keys act on an open label's text. Typed text, AltGr text and the label's caret and erase keys win over any binding. A held paste repeats in a label.
+- **Harness.** `WRENTEST_LINUX_MODIFIER` picks a lane's mode (default `alt`). `mod` and `opt` work in `editor.key` and `board.key`, and `native_mod`, `native_opt` and `mod_label` cover native chords.
+
+Deferred:
+- the settings writer turns CRLF line endings into LF when it replaces a line (pre-existing);
+- on macOS, changing only `linux-modifier` reinstalls the native menu.
