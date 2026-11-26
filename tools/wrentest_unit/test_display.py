@@ -244,6 +244,13 @@ class SmokeAssertionTests(unittest.TestCase):
                 self.assertTrue(Path(env[variable]).is_relative_to(root))
                 self.assertTrue(Path(env[variable]).is_dir())
 
+    def test_app_environment_takes_the_lanes_decorations(self):
+        for lane, expected in (({}, None), ({"WRENTEST_DECORATIONS": "off"}, "off")):
+            with self.subTest(lane=lane), tempfile.TemporaryDirectory() as root:
+                with patch.dict(os.environ, {"WREN_TEST_DECORATIONS": "off", **lane}, clear=True):
+                    env = test_setup.isolated_environment(Path(root))
+                self.assertEqual(env.get("WREN_TEST_DECORATIONS"), expected)
+
     def test_blank_capture_does_not_pass_as_rendered_text(self):
         background = test_setup.BACKGROUNDS["dark"]
         image = test_setup.png.PNG(640, 400, bytes((*background, 255)) * (640 * 400))

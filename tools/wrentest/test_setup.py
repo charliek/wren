@@ -11,7 +11,7 @@ import tempfile
 
 import pytest
 
-from tools.wrentest import png
+from tools.wrentest import png, ui
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKGROUNDS = {"dark": (0x14, 0x16, 0x1B), "light": (0xF7, 0xF8, 0xFA)}
@@ -62,6 +62,7 @@ def isolated_environment(root: Path, *, test_mode: bool = True) -> dict[str, str
         env[variable] = str(path)
     if test_mode:
         env["WREN_TEST_MODE"] = "1"
+    ui.add_decorations(env)
     return env
 
 

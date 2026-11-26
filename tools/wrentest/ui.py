@@ -264,12 +264,20 @@ def _build_env(sandbox: Path) -> dict[str, str]:
         path.mkdir(mode=0o700, exist_ok=True)
         env[var] = str(path)
     env["WREN_TEST_MODE"] = "1"
+    add_decorations(env)
+    return env
+
+
+def add_decorations(env: dict[str, str]) -> None:
+    """Pass the lane's ``WRENTEST_DECORATIONS`` to a launch as the app's
+    ``WREN_TEST_DECORATIONS``: ``off`` opens the window undecorated (what
+    ``run_display.py`` asks for under its Weston), and ``on`` or unset adds
+    nothing. Every builder of a launch environment calls this."""
     decorations = os.environ.get("WRENTEST_DECORATIONS", "") or "on"
     if decorations not in ("on", "off"):
         raise ValueError(f"WRENTEST_DECORATIONS must be on or off, got {decorations!r}")
     if decorations == "off":
         env["WREN_TEST_DECORATIONS"] = "off"
-    return env
 
 
 def _wait_for_compositor(env: dict[str, str], timeout: float = COMPOSITOR_TIMEOUT) -> None:
