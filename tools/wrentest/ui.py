@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -37,6 +38,8 @@ READINESS_POLL: float = 0.15
 QUIT_TIMEOUT: float = 10.0
 SIGTERM_TIMEOUT: float = 5.0
 _FINAL_REAP_TIMEOUT: float = 5.0
+# Long enough for tools/run_display.py to start Weston again three times.
+COMPOSITOR_TIMEOUT: float = 60.0
 
 _PRESERVE_VARS = frozenset({
     "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR",
@@ -236,6 +239,30 @@ def _build_env(sandbox: Path) -> dict[str, str]:
         env[var] = str(path)
     env["WREN_TEST_MODE"] = "1"
     return env
+
+
+def _wait_for_compositor(env: dict[str, str], timeout: float = COMPOSITOR_TIMEOUT) -> None:
+    """Wait until the Wayland compositor in *env*, if any, accepts a
+    connection: one tools/run_display.py is starting again after a crash
+    refuses it for a moment, and an app launched then could not connect."""
+    name, runtime = env.get("WAYLAND_DISPLAY"), env.get("XDG_RUNTIME_DIR")
+    if not name or not (runtime or name.startswith("/")):
+        return
+    path = name if name.startswith("/") else os.path.join(runtime, name)
+    deadline = time.monotonic() + timeout
+    while True:
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(1)
+            try:
+                probe.connect(path)
+                return
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"No Wayland compositor accepted a connection at {path} "
+                        f"within {timeout:g}s: {error}"
+                    ) from error
+        time.sleep(0.1)
 
 
 class WrenApp:
@@ -536,6 +563,7 @@ class WrenApp:
         env = _build_env(home_root)
         if self._today is not None:
             env["WREN_TEST_TODAY"] = self._today
+        _wait_for_compositor(env)
 
         self._artifacts_base.mkdir(parents=True, exist_ok=True)
         stamp = f"{time.monotonic_ns()}-{self._launch_counter}"

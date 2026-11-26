@@ -6,50 +6,61 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock, call, patch
 from xml.etree import ElementTree
 
 from tools import run_display
-from tools.wrentest import test_setup
+from tools.wrentest import test_setup, ui
 
 
 class DisplayTests(unittest.TestCase):
     def test_owned_process_is_cleaned_up_after_interruption(self):
         process = Mock()
-        process.wait.side_effect = KeyboardInterrupt
         with patch.object(run_display.subprocess, "Popen", return_value=process) as launch:
-            with patch.object(run_display, "stop_owned_group") as stop:
-                with self.assertRaises(KeyboardInterrupt):
-                    run_display.run_owned(["example"], {})
-                stop.assert_called_once_with(process)
+            with patch.object(run_display, "wait_exited", side_effect=KeyboardInterrupt):
+                with patch.object(run_display, "stop_owned_group") as stop:
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_display.run_owned(["example"], {})
+                    stop.assert_called_once_with(process)
         launch.assert_called_once_with(["example"], env={}, start_new_session=True)
 
-    def test_cleanup_escalates_only_the_owned_process_group(self):
-        process = Mock(pid=12345)
-        process.wait.side_effect = [subprocess.TimeoutExpired("example", 1), 0]
-        with patch.object(run_display.os, "killpg") as kill:
+    def test_cleanup_signals_the_group_before_reaping_its_leader(self):
+        process = Mock(pid=12345, returncode=None)
+        with patch.object(run_display, "wait_exited", return_value=False) as waited, \
+                patch.object(run_display.os, "killpg") as kill:
             run_display.stop_owned_group(process)
         self.assertEqual(kill.call_args_list, [
             call(12345, signal.SIGTERM), call(12345, signal.SIGKILL),
         ])
-        self.assertEqual(process.wait.call_args_list, [call(timeout=1), call(timeout=5)])
+        waited.assert_called_once_with(process, timeout=1)
+        process.wait.assert_called_once_with(timeout=5)
 
-    def test_cleanup_reaps_an_already_exited_process(self):
-        process = Mock(pid=12345)
-        with patch.object(run_display.os, "killpg", side_effect=ProcessLookupError):
+    def test_a_reaped_process_group_is_never_signalled(self):
+        process = Mock(pid=12345, returncode=0)
+        with patch.object(run_display.os, "killpg") as kill:
             run_display.stop_owned_group(process)
-        self.assertEqual(process.wait.call_count, 2)
+        kill.assert_not_called()
+        process.wait.assert_called_once_with(timeout=5)
 
-    def test_ready_socket_is_a_real_unix_socket(self):
+    def test_a_real_group_is_stopped_and_its_leader_reaped(self):
+        process = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        run_display.stop_owned_group(process)
+        self.assertEqual(process.returncode, -signal.SIGTERM)
+
+    def test_ready_means_listening_not_only_bound(self):
         with tempfile.TemporaryDirectory(prefix="wren-socket-") as root:
             path = Path(root) / "wayland-test"
             with socket.socket(socket.AF_UNIX) as server:
                 server.bind(str(path))
-                process = Mock()
+                self.assertFalse(run_display.accepts(path))
+                server.listen()
+                process = Mock(returncode=None)
                 run_display.wait_for_socket(path, process, Path(root) / "unused.log")
-                process.poll.assert_not_called()
 
     def test_a_regular_file_is_not_compositor_readiness(self):
         with tempfile.TemporaryDirectory() as root:
@@ -57,74 +68,19 @@ class DisplayTests(unittest.TestCase):
             path.touch()
             log = Path(root) / "weston.log"
             log.write_text("diagnostic output")
-            process = Mock()
-            process.poll.return_value = None
-            with patch.object(run_display.time, "monotonic", side_effect=[0, 16]):
+            with patch.object(run_display, "has_exited", return_value=False), \
+                    patch.object(run_display.time, "monotonic", side_effect=[0, 16]):
                 with self.assertRaisesRegex(RuntimeError, "diagnostic output"):
-                    run_display.wait_for_socket(path, process, log)
+                    run_display.wait_for_socket(path, Mock(), log)
             self.assertTrue(log.exists())
 
     def test_compositor_exit_fails_without_waiting_for_timeout(self):
         with tempfile.TemporaryDirectory() as root:
             log = Path(root) / "weston.log"
             log.write_text("failed to initialize")
-            process = Mock()
-            process.poll.return_value = 1
+            process = Mock(returncode=1)
             with self.assertRaisesRegex(RuntimeError, "failed to initialize"):
                 run_display.wait_for_socket(Path(root) / "missing", process, log)
-
-    def compositor(self, root: str, codes: list[int]) -> tuple[run_display.Compositor, Mock]:
-        socket_path = Path(root) / "wayland-test"
-        compositor = run_display.Compositor(Path(root), socket_path, {})
-        processes = iter([Mock(**{"wait.return_value": code}) for code in codes])
-
-        def launch():
-            # Each Weston leaves its socket behind when it dies.
-            socket_path.touch()
-            compositor.process = next(processes)
-            compositor.log = Path(root) / "weston.log"
-
-        launch = Mock(side_effect=launch)
-        compositor.launch = launch
-        compositor.launch()
-        launch.reset_mock()
-        return compositor, launch
-
-    def test_a_dead_compositor_is_restarted_a_few_times_with_a_notice(self):
-        with tempfile.TemporaryDirectory() as root:
-            compositor, launch = self.compositor(root, [-signal.SIGSEGV, -signal.SIGKILL, 0, 1])
-            unlinked = []
-            original = Path.unlink
-
-            def unlink(path, missing_ok=False):
-                unlinked.append(path.exists())
-                original(path, missing_ok=missing_ok)
-
-            with patch.object(run_display, "stop_owned_group") as stop, \
-                    patch.object(Path, "unlink", unlink), \
-                    patch.object(run_display.sys, "stderr", new_callable=io.StringIO) as err:
-                compositor.watch()
-            self.assertEqual(launch.call_count, run_display.Compositor.RESTARTS)
-            self.assertEqual(stop.call_count, run_display.Compositor.RESTARTS + 1)
-            self.assertEqual(unlinked, [True] * run_display.Compositor.RESTARTS)
-            lines = err.getvalue().splitlines()
-            self.assertIn("Weston exited with signal SIGSEGV", lines[0])
-            self.assertIn("restarted (1 of 3)", lines[0])
-            self.assertIn("signal SIGKILL", lines[1])
-            self.assertIn("code 0", lines[2])
-            self.assertIn("code 1", lines[3])
-            self.assertIn("not restarting after 3 restarts", lines[3])
-
-    def test_a_compositor_stopped_on_purpose_is_not_restarted(self):
-        with tempfile.TemporaryDirectory() as root:
-            compositor, launch = self.compositor(root, [-signal.SIGTERM])
-            with patch.object(run_display, "stop_owned_group") as stop, \
-                    patch.object(run_display.sys, "stderr", new_callable=io.StringIO) as err:
-                compositor.stop()
-                compositor.watch()
-            launch.assert_not_called()
-            stop.assert_called_once()
-            self.assertEqual(err.getvalue(), "")
 
     def test_private_bus_has_no_desktop_service_activation(self):
         with tempfile.TemporaryDirectory() as root:
@@ -149,6 +105,108 @@ class DisplayTests(unittest.TestCase):
                 with patch.object(run_display, "run_display", return_value=child):
                     with patch.object(run_display.signal, "signal"):
                         self.assertEqual(run_display.main(["x11", "--", "example"]), expected)
+
+
+# A stand-in compositor: listens on the socket path it is given until killed.
+LISTENER = (
+    "import socket, sys, time\n"
+    "server = socket.socket(socket.AF_UNIX)\n"
+    "server.bind(sys.argv[1])\n"
+    "server.listen()\n"
+    "time.sleep(60)\n"
+)
+
+
+class CompositorTests(unittest.TestCase):
+    """The watcher with real processes: listeners for a Weston that comes up,
+    and a process that exits for one that cannot."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="wren-c-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.socket = self.root / "wayland-test"
+        self.stderr = io.StringIO()
+        stderr = patch.object(run_display.sys, "stderr", self.stderr)
+        stderr.start()
+        self.addCleanup(stderr.stop)
+
+    def compositor(self, *kinds: str) -> run_display.Compositor:
+        commands = iter([
+            [sys.executable, "-I", "-c", LISTENER, str(self.socket)] if kind == "listens"
+            else [sys.executable, "-I", "-c", "raise SystemExit(3)"]
+            for kind in kinds
+        ])
+        compositor = run_display.Compositor(self.root, self.socket, {}, command=lambda: next(commands))
+        compositor.POLL = 0.02
+        self.addCleanup(compositor.stop)
+        return compositor
+
+    def wait(self, predicate, what: str) -> None:
+        deadline = time.monotonic() + 20
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, f"timed out waiting for {what}")
+            time.sleep(0.02)
+
+    def test_a_failed_replacement_is_reported_and_the_next_attempt_runs(self):
+        compositor = self.compositor("listens", "exits", "listens")
+        compositor.start()
+        self.assertTrue(run_display.accepts(self.socket))
+        first = compositor.process
+        os.kill(first.pid, signal.SIGKILL)
+        self.wait(lambda: compositor.attempts == 2 and compositor.process is not None
+                  and compositor.process is not first and run_display.accepts(self.socket),
+                  "the second attempt listening")
+        replacement = compositor.process
+        self.assertEqual(first.returncode, -signal.SIGKILL)
+        compositor.stop()
+        self.assertIsNotNone(replacement.returncode)
+        self.assertFalse(compositor.watcher.is_alive())
+        self.assertFalse(compositor.lost)
+        lines = self.stderr.getvalue().splitlines()
+        self.assertIn("Weston exited with signal SIGKILL", lines[0])
+        self.assertIn("restart 1 of 3 failed: Weston did not become ready", lines[1])
+        self.assertIn("Weston restarted (2 of 3)", lines[2])
+        self.assertEqual(len(lines), 3)
+
+    def test_when_restarts_run_out_the_command_is_stopped_and_the_run_lost(self):
+        compositor = self.compositor("listens", "exits", "exits", "exits")
+        compositor.start()
+        command = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: command.poll() is None and command.kill())
+        compositor.supervise(command)
+        os.kill(compositor.process.pid, signal.SIGKILL)
+        self.assertEqual(command.wait(timeout=20), -signal.SIGTERM)
+        self.wait(lambda: not compositor.watcher.is_alive(), "the watcher to finish")
+        self.assertTrue(compositor.lost)
+        self.assertEqual(compositor.attempts, 3)
+        self.assertIn("stopping the run", self.stderr.getvalue())
+
+    def test_a_compositor_stopped_on_purpose_is_not_restarted(self):
+        compositor = self.compositor("listens")
+        compositor.start()
+        process = compositor.process
+        compositor.stop()
+        self.assertEqual(process.returncode, -signal.SIGTERM)
+        self.assertFalse(compositor.watcher.is_alive())
+        self.assertEqual((compositor.attempts, self.stderr.getvalue()), (0, ""))
+
+    def test_a_launch_waits_for_a_compositor_starting_again(self):
+        env = {"WAYLAND_DISPLAY": self.socket.name, "XDG_RUNTIME_DIR": str(self.root)}
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(self.socket))
+            # Bound but not listening, as a restarting Weston's socket can be.
+            timer = threading.Timer(0.3, server.listen)
+            timer.start()
+            self.addCleanup(timer.cancel)
+            started = time.monotonic()
+            ui._wait_for_compositor(env, timeout=10)
+            self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+    def test_a_launch_fails_clearly_when_no_compositor_comes_back(self):
+        env = {"WAYLAND_DISPLAY": self.socket.name, "XDG_RUNTIME_DIR": str(self.root)}
+        with self.assertRaisesRegex(RuntimeError, "No Wayland compositor accepted"):
+            ui._wait_for_compositor(env, timeout=0.3)
 
 
 class SmokeAssertionTests(unittest.TestCase):
