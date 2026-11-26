@@ -10,6 +10,7 @@ pub mod owners;
 pub mod reconcile;
 pub mod scan;
 pub mod settings;
+pub mod task_write;
 pub mod tasks;
 pub mod tasks_file;
 pub mod theme;

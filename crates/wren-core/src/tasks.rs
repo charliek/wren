@@ -174,7 +174,7 @@ pub fn hides_tasks(source: &str) -> bool {
 
 /// A top-level `key: value` line of front matter: the key, and the value
 /// without its quotes or a comment after it.
-fn key_value(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn key_value(line: &str) -> Option<(&str, &str)> {
     let key = line
         .bytes()
         .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
@@ -204,7 +204,7 @@ fn key_value(line: &str) -> Option<(&str, &str)> {
 }
 
 /// What a YAML 1.1 boolean says, `None` for any other value.
-fn switch(value: &str) -> Option<bool> {
+pub(crate) fn switch(value: &str) -> Option<bool> {
     let is = |word: &str| value.eq_ignore_ascii_case(word);
     if is("on") || is("true") || is("yes") {
         Some(true)
@@ -1110,6 +1110,38 @@ pub fn read_note(note: NoteId, path: &RelPath, source: &str) -> (Vec<TaskRecord>
     (tasks, hidden)
 }
 
+/// The lines of `source` that are tasks, in order: those [`read_note`]
+/// gives a record. What a write to a task line checks the line against.
+pub fn task_lines(source: &str) -> Vec<usize> {
+    if !may_hold_task(source) {
+        return Vec::new();
+    }
+    let ranges: Vec<Range<usize>> = wren_markdown::line_ranges(source)
+        .map(|(range, _)| range)
+        .collect();
+    let lines = Split {
+        source,
+        ranges: &ranges,
+    };
+    let mut kept = Checkpoints::states(Boxes::Status);
+    kept.update_from(&lines, 0);
+    let mut found = Vec::new();
+    kept.read(
+        &lines,
+        0..lines.line_count(),
+        |index, text, info, scanner| {
+            let task = (text.contains('['))
+                .then(|| checkpoints::opened_task(info, scanner))
+                .flatten()
+                .and_then(|found| task::parse(text, found));
+            if task.is_some() {
+                found.push(index);
+            }
+        },
+    );
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1135,6 +1167,22 @@ mod tests {
     /// `text` read as note 1 at `S/G/Note.md`.
     fn read(text: &str) -> Vec<TaskRecord> {
         read_note(NoteId(1), &path("S/G/Note.md"), text).0
+    }
+
+    #[test]
+    fn task_lines_are_the_lines_a_note_gives_records_for() {
+        for text in [
+            "",
+            "no box here",
+            "- [ ] a\n  - [x] nested\n\ttext\n- plain\n- [/] b",
+            "---\nkey: v\n- [ ] in front matter\n---\n- [ ] body\n",
+            "```\n- [ ] fenced\n```\n> - [ ] quoted\n- [ ] last\r\n- [?] odd\r\n",
+            "\u{feff}- [ ] marked\n    - [ ] code or nested\n",
+        ] {
+            let lines: Vec<usize> = read(text).iter().map(|task| task.line).collect();
+            assert_eq!(task_lines(text), lines, "{text:?}");
+        }
+        assert_eq!(task_lines("- [ ] a\n```\n- [ ] b\n```\n- [ ] c"), [0, 4]);
     }
 
     fn note(id: u64, at: &str) -> Note {

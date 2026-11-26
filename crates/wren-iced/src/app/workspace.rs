@@ -7,6 +7,8 @@ use wren_core::model::{GroupId, ItemRef, Parent, SectionId, Workspace};
 #[cfg(feature = "smoke-test")]
 use wren_core::ops::Document;
 use wren_core::ops::{Event, ExternalChangeKind, Op, Session, SessionOptions};
+
+use super::task_target::Seen;
 use wren_core::reconcile::ReconcileResult;
 
 use super::board::{self, Surface};
@@ -129,6 +131,13 @@ impl EffectBefore {
                         )
                         .collect::<Vec<_>>()
             }
+            // The bytes are published, whatever was reported after.
+            Op::EditTaskLine { .. } => events
+                .iter()
+                .any(|event| matches!(event, Event::TaskLineWritten { .. })),
+            Op::EditTaskSwitch { .. } => events
+                .iter()
+                .any(|event| matches!(event, Event::TaskSwitchWritten { .. })),
             Op::SetWidth { pane, .. } => session.state().width(pane).is_some(),
             Op::ResetWidths => true,
             Op::SetSort { group, mode } => session
@@ -863,6 +872,23 @@ impl App {
                         self.banner = Some("The open note was removed outside Wren.".into());
                     }
                 },
+                Event::TaskLineWritten {
+                    line,
+                    before,
+                    after,
+                    ..
+                } => self.task_write_seen(Seen::Line {
+                    line: *line,
+                    before: before.clone(),
+                    after: after.clone(),
+                }),
+                Event::TaskSwitchWritten { before, after, .. } => {
+                    self.task_write_seen(Seen::Switch {
+                        before: before.clone(),
+                        after: after.clone(),
+                    });
+                }
+                Event::TaskWriteStale { .. } => self.task_write_seen(Seen::Stale),
                 _ => {}
             }
         }

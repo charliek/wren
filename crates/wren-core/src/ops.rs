@@ -11,6 +11,7 @@ use crate::model::{
 };
 use crate::reconcile::{self, ReconcileJob, ReconcileResult, Scanned, Tags};
 use crate::scan;
+use crate::task_write::{self, LineChange, Refused, SwitchChange};
 use crate::tasks::TaskIndex;
 use crate::tasks_file::{TaskFilters, TasksFile};
 use crate::watch::Watch;
@@ -101,6 +102,32 @@ pub enum Op {
         scope: Option<ItemRef>,
         filters: TaskFilters,
     },
+    /// Rewrite one task line of a Markdown note that is not open: the
+    /// line that read `expect` on line `line` when the task was listed,
+    /// found as [`task_write::locate`] finds it in the file as it is now.
+    /// The open document is settled first; the write is a compare-and-swap
+    /// on the bytes read, and makes no conflict copy. Once the line cannot
+    /// be found, or the file changed under the write, nothing is written,
+    /// the note is read again and the op fails with
+    /// [`task_write::CHANGED`]. The open note is refused: its editor is
+    /// its one writer, and a frontend applies [`task_write::plan_line`] to
+    /// that. Refused while tasks are off.
+    EditTaskLine {
+        note: NoteId,
+        line: usize,
+        expect: String,
+        change: LineChange,
+    },
+    /// "Hide tasks in this note": set or take away `tasks: off` in the
+    /// front matter of a Markdown note that is not open
+    /// ([`task_write::plan_switch`]), or put the front matter back as it
+    /// was. Settles, writes and refuses as [`Op::EditTaskLine`] does,
+    /// failing with [`task_write::SWITCH_CHANGED`] for front matter that
+    /// is not what a `Restore` expects.
+    EditTaskSwitch {
+        note: NoteId,
+        change: SwitchChange,
+    },
     Back,
     Forward,
 }
@@ -132,6 +159,30 @@ pub enum Event {
     },
     WorkspaceOpened,
     Warning(String),
+    /// [`Op::EditTaskLine`] wrote line `line` of a note that is not open:
+    /// it read `before` and reads `after` now, each without its ending.
+    /// Undoing it expects `after` there and writes `before`.
+    TaskLineWritten {
+        note: NoteId,
+        line: usize,
+        before: String,
+        after: String,
+    },
+    /// [`Op::EditTaskSwitch`] changed the front matter of a note that is
+    /// not open from `before` to `after`
+    /// ([`task_write::SwitchWrite`]). Undoing it expects `after` and
+    /// writes `before`.
+    TaskSwitchWritten {
+        note: NoteId,
+        before: String,
+        after: String,
+    },
+    /// A task write found the note changed and wrote nothing. The note
+    /// was read again, so the task index holds it as it is now: whatever
+    /// lists its tasks should list them afresh.
+    TaskWriteStale {
+        note: NoteId,
+    },
 }
 
 #[derive(Debug)]
@@ -602,6 +653,13 @@ impl Session {
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
     }
+    /// For tests, as [`Session::fail_next`] is: `writer` runs inside the
+    /// next write to the workspace, after its comparison with the bytes
+    /// expected and before its publication, as another program may.
+    #[doc(hidden)]
+    pub fn race_next_write(&mut self, writer: impl FnOnce() + Send + 'static) {
+        self.store.race_next(writer);
+    }
     /// For tests, as [`Session::fail_next`] is: lower the search index's
     /// content budget to `bytes`, dropping content that no longer fits.
     #[doc(hidden)]
@@ -849,6 +907,37 @@ impl Session {
                     .set_filters(path.as_ref(), &filters)?;
                 self.persist_tasks_file(events)
             }
+            Op::EditTaskLine {
+                note,
+                line,
+                expect,
+                change,
+            } => self.write_closed(note, now, events, task_write::CHANGED, |source| {
+                let write = task_write::plan_line(source, line, &expect, &change)?;
+                Ok(write.changes().then(|| {
+                    let text = write.apply(source);
+                    let written = Event::TaskLineWritten {
+                        note,
+                        line: write.line,
+                        before: write.before,
+                        after: write.after,
+                    };
+                    (text, written)
+                }))
+            }),
+            Op::EditTaskSwitch { note, change } => {
+                self.write_closed(note, now, events, task_write::SWITCH_CHANGED, |source| {
+                    Ok(task_write::plan_switch(source, &change)?.map(|write| {
+                        let text = write.apply(source);
+                        let written = Event::TaskSwitchWritten {
+                            note,
+                            before: write.before,
+                            after: write.after,
+                        };
+                        (text, written)
+                    }))
+                })
+            }
             Op::Flush => {
                 self.flush_active(now, true, events)?;
                 self.store
@@ -1002,6 +1091,85 @@ impl Session {
                 self.select(Some(note), now, Navigation::History(index), events)
             }
         }
+    }
+
+    /// Rewrite the Markdown note `note`, which is not open, as `plan`
+    /// makes of its text: the text to write and the event that says what
+    /// was written, or nothing when nothing changes.
+    ///
+    /// The open document is settled first, so two writers never race: a
+    /// flush that fails blocks the write and keeps the draft. The write
+    /// is a compare-and-swap on the bytes the plan was made on. When the
+    /// plan finds its place changed, or the file changes under the write,
+    /// nothing is written and no conflict copy is made (those are for an
+    /// open document's draft): the note is read again, so both indexes
+    /// hold it as it is, and the op fails with `stale`. The bytes
+    /// published reach both indexes and the model at once, and a scan
+    /// begun before the write cannot put the older text back.
+    fn write_closed(
+        &mut self,
+        note: NoteId,
+        now: Duration,
+        events: &mut Vec<Event>,
+        stale: &str,
+        plan: impl FnOnce(&str) -> Result<Option<(String, Event)>, Refused>,
+    ) -> Result<(), String> {
+        if !self.options.tasks {
+            return Err("Tasks are turned off; set `tasks = on` to change tasks".into());
+        }
+        let Some(entry) = self.model.note(note) else {
+            events.push(Event::TaskWriteStale { note });
+            return Err(stale.into());
+        };
+        if entry.kind != NoteKind::Markdown {
+            return Err("Only a Markdown note holds tasks".into());
+        }
+        if self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.note == note)
+        {
+            return Err("The open note is changed in its editor".into());
+        }
+        let path = entry.path.clone();
+        self.flush_active(now, true, events)?;
+        let mut refresh = |session: &mut Self| {
+            session.reread(note);
+            events.push(Event::TaskWriteStale { note });
+            stale.to_owned()
+        };
+        let file = match self.store.read(&path) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => return Err(refresh(self)),
+            Err(error) => return Err(error.to_string()),
+        };
+        let source = std::str::from_utf8(&file.bytes)
+            .map_err(|_| "The note is not valid UTF-8; it was left untouched")?;
+        let (text, written) = match plan(source) {
+            Ok(Some(planned)) => planned,
+            Ok(None) => return Ok(()),
+            Err(Refused::Changed) => return Err(refresh(self)),
+            Err(Refused::Invalid(why)) => return Err(why),
+        };
+        let receipt = match (self.store).write(&path, text.as_bytes(), Expected::Bytes(&file.bytes))
+        {
+            Ok(receipt) => receipt,
+            Err(error) if error.is_conflict() => return Err(refresh(self)),
+            Err(error) => return Err(error.to_string()),
+        };
+        self.index.set_content(note, &text, false);
+        self.record_file(note, &receipt.file);
+        events.push(written);
+        if let Some(error) = receipt.durability_error {
+            return Err(format!(
+                "The note was written, but durability is unconfirmed: {error}"
+            ));
+        }
+        events.push(Event::NoteSaved {
+            note,
+            mtime: receipt.file.modified,
+        });
+        Ok(())
     }
 
     fn edit_draft(

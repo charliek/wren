@@ -322,12 +322,24 @@ impl StoreReader {
     }
 }
 
+/// A test's stand-in for another program writing to the workspace: run
+/// once, inside the next [`FsStore::write`], after it has compared the
+/// file with what its caller expects and before it publishes.
+struct Race(Box<dyn FnOnce() + Send>);
+
+impl fmt::Debug for Race {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Race")
+    }
+}
+
 #[derive(Debug)]
 pub struct FsStore {
     reader: StoreReader,
     // This descriptor, and the persistent name, must survive for the entire lock.
     lock: File,
     fault: Option<Fault>,
+    race: Option<Race>,
     pending_directories: Vec<PendingDirectory>,
     // Losing an unsynced descriptor means later retries cannot prove durability.
     durability_tracking_error: Option<String>,
@@ -386,6 +398,7 @@ impl FsStore {
             reader,
             lock,
             fault: None,
+            race: None,
             pending_directories: Vec::new(),
             durability_tracking_error: None,
             warnings: Vec::new(),
@@ -404,6 +417,14 @@ impl FsStore {
 
     pub fn fail_next(&mut self, fault: Fault) {
         self.fault = Some(fault);
+    }
+
+    /// For tests, as [`FsStore::fail_next`] is: `writer` runs inside the
+    /// next [`FsStore::write`], between its first comparison and its
+    /// publication, as a program that does not take Wren's lock may.
+    #[doc(hidden)]
+    pub fn race_next(&mut self, writer: impl FnOnce() + Send + 'static) {
+        self.race = Some(Race(Box::new(writer)));
     }
 
     pub fn pending_durability(&self) -> bool {
@@ -477,6 +498,9 @@ impl FsStore {
         let mode = baseline.as_ref().map(|value| value.file.mode);
         let (mut temporary, file) = self.prepare_file(&directory, bytes, mode)?;
         self.inject(Fault::BeforePublish)?;
+        if let Some(Race(writer)) = self.race.take() {
+            writer();
+        }
         self.check_directory(parent.as_ref(), &directory)?;
         match &baseline {
             Some(baseline) => {

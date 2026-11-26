@@ -253,6 +253,14 @@ impl Viewport {
     pub fn cursor(&self) -> Cursor {
         self.cursor
     }
+
+    /// This view with `cursor` for its cursor and selection: where to come
+    /// back to after an edit a host made while its user looked elsewhere,
+    /// which moved them with the text and should leave the view in place.
+    #[must_use]
+    pub fn with_cursor(self, cursor: Cursor) -> Self {
+        Self { cursor, ..self }
+    }
 }
 
 /// A self-contained Markdown editor backed by a fork of iced's text editor
@@ -5843,6 +5851,47 @@ mod tests {
                 ev.content.lay_out(size);
                 assert_eq!(ev.first_visible_line(), top, "restoring {origin_cursor:?}");
                 assert_eq!(ev.cursor(), origin_cursor);
+            }
+        }
+
+        #[test]
+        fn an_edit_applied_away_from_the_view_leaves_the_view_in_place() {
+            let size = iced::Size::new(300.0, 240.0);
+            let selected = Cursor {
+                position: Position { line: 5, column: 4 },
+                selection: Some(Position { line: 5, column: 0 }),
+            };
+            // An edit on the cursor's line, above it, and far below the view.
+            for (cursor, line) in [(super::at(2, 3), 2), (selected, 1), (super::at(2, 0), 250)] {
+                let mut ev = editor(&super::numbered_lines(300));
+                ev.content.lay_out(size);
+                ev.move_cursor(cursor);
+                ev.content.lay_out(size);
+                ev.perform(Action::Scroll { lines: 100 });
+                ev.content.lay_out(size);
+                let top = ev.first_visible_line();
+                assert!(top > 50, "scrolled to {top}");
+
+                // As a host does it: the view first, then the edit with the
+                // cursor where its text went, then the view again.
+                let origin = ev.viewport();
+                let landing = if line == cursor.position.line {
+                    super::at(line, cursor.position.column + 2)
+                } else {
+                    cursor
+                };
+                let insert = Replace::insert(Position { line, column: 0 }, "x ");
+                assert!(ev.apply(&[insert], landing));
+                ev.restore_viewport(origin.with_cursor(ev.cursor()));
+                ev.content.lay_out(size);
+                assert_eq!(ev.cursor(), landing, "line {line}");
+                // iced's next update after an edit reveals the cursor.
+                if KIND == BackendKind::Owned {
+                    assert_eq!(ev.first_visible_line(), top, "line {line}");
+                }
+                assert!(ev.undo(), "one step");
+                assert!(!ev.can_undo());
+                assert_eq!(ev.text(), super::numbered_lines(300));
             }
         }
 

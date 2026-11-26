@@ -36,6 +36,11 @@ mod task_footer;
 mod task_form;
 mod task_menus;
 mod task_suggest;
+// Its callers are the task view's keys and menus and the Notes column's
+// commands (items 10.2 and 10.4 of discovery/tasks-build.md); without
+// them only the harness and the tests write through it.
+#[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
+mod task_target;
 mod tasks;
 mod tasks_view;
 mod workspaces;
@@ -91,6 +96,9 @@ pub struct App {
     /// The task views in Back and Forward history, and the one in the
     /// pane; see `tasks_view::Trail`. Empty with tasks off.
     task_views: tasks_view::Trail,
+    /// The task writes made from outside the editor that can be undone;
+    /// see `task_target`.
+    task_writes: task_target::Writes,
     /// Each time the keyboard was given to a column: the surface the pane
     /// showed when it was the pane's, `None` for a browser column.
     #[cfg(test)]
@@ -438,6 +446,7 @@ impl App {
             owners: wren_core::owners::Owners::default(),
             label_widths: task_footer::Widths::default(),
             task_views: tasks_view::Trail::default(),
+            task_writes: task_target::Writes::default(),
             #[cfg(test)]
             focus_given: Default::default(),
             editor: EditorView::with_backend(engine, &contents),
