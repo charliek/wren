@@ -259,9 +259,6 @@ fn task_of(spans: &LineSpans) -> Option<block::Task> {
 /// its menus check and what the calendar opens on. A nested task's line,
 /// read alone, would be indented code, so what indents it is left out;
 /// the ranges the answer gives are of the line without it.
-// The task view's menus read their rows with it (the client of item 10.4
-// of discovery/tasks-build.md); until then only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn row_task(line: &str) -> Option<TaskLine<'_>> {
     let line = line.trim_start();
     let task = Scanner::new(Boxes::Status).next_line(line).item?.task?;

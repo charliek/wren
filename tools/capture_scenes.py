@@ -34,7 +34,10 @@ Color Emoji.
 sam.lee`) on the advanced engine with `tasks = on` and the same pinned day,
 and shoots the view of the workspace's tasks: all of them, narrowed by a
 status chip, grouped by due date and by owner, an empty list with its hint,
-and the scope menu open; the PNGs go where `--only tasks` writes them.
+and the scope menu open; then a row's writes (item 10.4): its status,
+priority and task menus, the calendar and the form over it, the message
+with Undo after a write, and a row held in place under the Open chip after
+it was marked done; the PNGs go where `--only tasks` writes them.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -517,6 +520,55 @@ def task_list_scenes(client, shot_here) -> None:
     assert view()["list"]["menu"] is None
     assert view()["list"]["filters"] == {"statuses": [], "owner": "anyone", "group": "note",
                                           "hide_old": True, "due": None, "priority": None}
+
+
+def task_write_scenes(client, shot_here) -> None:
+    """Writes from the summary view (discovery/tasks-build.md item 10.4), on
+    the first open row with a due date: its status menu (S), priority menu
+    (P) and task menu (a right-click) under its cells, the calendar (D) and
+    the task form (E) over it, the message with Undo after Space marks it
+    done, and that row held where it stood with the Open chip pressed."""
+    def view(**params):
+        return client.call("tasks.view", {**params, "list": True})["list"]
+
+    def press(key: str):
+        return view(key={"key": key, "mods": []})
+
+    state = view(open={"scope": "workspace"})
+    row = next(index for index, each in enumerate(state["rows"])
+               if each["status"] == "open" and each["due"] and not each["overdue"])
+    view(click={"row": row})
+    for key, menu, name in (("s", "row_status", "status"), ("p", "row_priority", "priority")):
+        assert press(key)["menu"]["for"] == menu
+        shot_here(f"task-row-{name}-menu")
+        assert press("escape")["menu"] is None
+    assert view(click={"right": row})["menu"]["for"] == "row_task"
+    shot_here("task-row-task-menu")
+    press("escape")
+    press("d")
+    assert client.call("tasks.calendar")["open"]
+    shot_here("task-row-calendar")
+    client.call("tasks.calendar_click", {"target": "outside"})
+    press("e")
+    assert client.call("tasks.form")["open"]
+    shot_here("task-row-form")
+    client.call("tasks.form_click", {"target": "cancel"})
+    press("space")
+    assert client.call("tasks.entry")["notice"]["undo"]
+    shot_here("task-row-message")
+    client.call("tasks.entry", {"undo": True})
+    # Another filter lets held rows go: the chip first, then the write.
+    state = view(click={"control": "chip:open"})
+    description = next(each["description"] for each in view()["rows"] if each["selected"])
+    row = next(index for index, each in enumerate(state["rows"])
+               if each["description"] == description)
+    view(click={"row": row})
+    state = press("space")
+    assert state["rows"][row]["held"] and state["rows"][row]["status"] == "done", state["rows"]
+    shot_here("task-row-held")
+    client.call("tasks.entry", {"undo": True})
+    press("r")
+    view(click={"control": "chip:open"})
 
 
 def suggestion_scenes(client, shot_here) -> None:
@@ -1761,6 +1813,7 @@ def main() -> int:
                     shot(app.client, name)
 
                 task_list_scenes(app.client, shot_list)
+                task_write_scenes(app.client, shot_list)
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

@@ -2329,7 +2329,8 @@ mod tests {
         let _ = app.update(Message::Calendar(Event::Pick(monday)));
         assert!(app.calendar.is_none());
         assert_eq!(on_disk(&directory, "B"), theirs);
-        assert_eq!(app.banner.as_deref(), Some(task_write::CHANGED));
+        let said = app.notice().map(|shown| shown.notice.text());
+        assert_eq!(said.as_deref(), Some(task_write::CHANGED));
 
         // The palette taking the keyboard closes it, writing nothing.
         assert!(app.open_row_calendar(row(&app, "A", 2), cell()).is_some());

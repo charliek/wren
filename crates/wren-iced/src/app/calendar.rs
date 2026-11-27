@@ -66,7 +66,7 @@ use wren_markdown::{Pos, Selection};
 use super::board::Surface;
 use super::commands::{CommandId, Disposition, Gateway};
 use super::task_menus::TaskMenus;
-use super::task_target::{RowChange, RowTarget};
+use super::task_target::RowTarget;
 use super::{App, Message};
 use crate::date_field::{self, FieldEvent};
 use crate::{chrome, fonts, theme};
@@ -132,9 +132,6 @@ enum Target {
     },
     /// A row of the task view, and the window's rectangle the card hangs
     /// under: the row's due cell.
-    // The task view's keys and menus open it (the client of item 10.4 of
-    // discovery/tasks-build.md); until then only the tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
     Row(RowTarget, Rectangle),
 }
 
@@ -491,9 +488,6 @@ impl App {
     /// due date or today, hung under `at` (the row's due cell), and give
     /// its field the keyboard. `None` with no task view showing, or where
     /// the row's line reads as no task.
-    // The task view's keys and menus open it (the client of item 10.4 of
-    // discovery/tasks-build.md); until then only the tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn open_row_calendar(
         &mut self,
         target: RowTarget,
@@ -667,7 +661,8 @@ impl App {
                 line, text, erase, ..
             } => self.write_editor_due(line, &text, erase, due, focus),
             Target::Row(target, _) => {
-                let written = self.write_task_row(&target, &RowChange::Change(Change::SetDue(due)));
+                let what = super::task_rows::What::Due(due);
+                let written = self.write_view_row(&target, Change::SetDue(due), what);
                 Task::batch([focus, written.gateway.task])
             }
         }

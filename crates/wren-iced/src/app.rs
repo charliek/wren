@@ -40,11 +40,8 @@ mod task_form;
 mod task_list;
 mod task_list_view;
 mod task_menus;
+mod task_rows;
 mod task_suggest;
-// Its callers are the task view's keys and menus and the Notes column's
-// commands (items 10.2 and 10.4 of discovery/tasks-build.md); without
-// them only the harness and the tests write through it.
-#[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
 mod task_target;
 mod tasks;
 mod tasks_view;

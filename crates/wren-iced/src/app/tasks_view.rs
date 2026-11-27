@@ -1492,10 +1492,12 @@ mod tests {
                 untouched(&app);
             }
             // Their keys, which only a focused editor runs: the app's copy of
-            // each press does nothing.
+            // each press does nothing to the note. `markdown.toggle_task`'s
+            // key is the view's own done toggle of its selected row (item
+            // 10.4, `task_rows.rs`), and `edit.undo`'s its undo, which has
+            // nothing to undo here.
             for id in [
                 CommandId::Bold,
-                CommandId::ToggleTask,
                 CommandId::TaskSetDue,
                 CommandId::TaskEdit,
                 CommandId::EditUndo,

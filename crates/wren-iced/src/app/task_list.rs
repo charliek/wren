@@ -206,6 +206,22 @@ impl RowKey {
     }
 }
 
+/// A row the view wrote, held where it stood when first written until the
+/// list is refreshed (R): in its group, at its place there, and shown
+/// whatever the filters now say of it (discovery/tasks-build.md item 10.4,
+/// the prototype's sticky rows). Found by its note and line, which a write
+/// to the line keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Hold {
+    pub note: NoteId,
+    pub line: usize,
+    pub group: GroupKey,
+    /// The group's label and detail, for a group the row alone now keeps.
+    pub label: (String, String),
+    /// Its place among the group's rows.
+    pub index: usize,
+}
+
 /// A scope's tasks as a view lists them.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Listing {
@@ -231,6 +247,7 @@ impl Listing {
     /// The list of `records` (a scope's tasks in the tree's order) under
     /// `filters`, with `me` the `tasks-me` names and `today` the day.
     /// `place` names a note's group header: its title, and where it is.
+    #[cfg(test)]
     pub fn build(
         records: Vec<TaskRecord>,
         filters: &TaskFilters,
@@ -238,6 +255,23 @@ impl Listing {
         today: Date,
         place: &dyn Fn(&TaskRecord) -> (String, String),
     ) -> Self {
+        Self::build_holding(records, filters, me, today, place, &[])
+    }
+
+    /// [`Listing::build`], with the rows `held` kept where they stood. The
+    /// chips count as if nothing were held.
+    pub fn build_holding(
+        records: Vec<TaskRecord>,
+        filters: &TaskFilters,
+        me: &[String],
+        today: Date,
+        place: &dyn Fn(&TaskRecord) -> (String, String),
+        held: &[Hold],
+    ) -> Self {
+        let hold_of = |record: &TaskRecord| {
+            held.iter()
+                .find(|hold| hold.note == record.note && hold.line == record.line)
+        };
         let mut chip_counts = [0; 4];
         let mut owners: Vec<(String, String)> = Vec::new();
         let mut kept = Vec::new();
@@ -248,13 +282,13 @@ impl Listing {
                     owners.push((folded, owner.clone()));
                 }
             }
-            if !keeps(record, filters, me, today, true) {
-                continue;
+            let wide = keeps(record, filters, me, today, true);
+            if wide {
+                if let Some(chip) = CHIPS.iter().position(|status| *status == record.status) {
+                    chip_counts[chip] += 1;
+                }
             }
-            if let Some(chip) = CHIPS.iter().position(|status| *status == record.status) {
-                chip_counts[chip] += 1;
-            }
-            if keeps(record, filters, me, today, false) {
+            if hold_of(record).is_some() || (wide && keeps(record, filters, me, today, false)) {
                 kept.push(index);
             }
         }
@@ -279,6 +313,10 @@ impl Listing {
             };
         for &index in &kept {
             let record = &records[index];
+            if let Some(hold) = hold_of(record) {
+                add(hold.group.clone(), index, &|| hold.label.clone());
+                continue;
+            }
             match filters.group_by {
                 GroupBy::Note => add(GroupKey::Note(record.note), index, &|| place(record)),
                 GroupBy::Due => {
@@ -338,6 +376,24 @@ impl Listing {
         let mut top = 0.0;
         for (index, group) in groups.iter_mut().enumerate() {
             group.rows.sort_by(|&a, &b| order(&records, today, a, b));
+            // A held row goes back to its place, the others round it.
+            let mut pinned: Vec<(usize, usize)> = (group.rows.iter())
+                .filter_map(|&row| {
+                    hold_of(&records[row])
+                        .filter(|hold| hold.group == group.key)
+                        .map(|hold| (hold.index, row))
+                })
+                .collect();
+            if !pinned.is_empty() {
+                group
+                    .rows
+                    .retain(|row| !pinned.iter().any(|(_, held)| held == row));
+                pinned.sort_unstable();
+                for (at, row) in pinned {
+                    let at = at.min(group.rows.len());
+                    group.rows.insert(at, row);
+                }
+            }
             entries.push(Entry::Header(index));
             tops.push(top);
             top += HEADER_HEIGHT;

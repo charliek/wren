@@ -1240,6 +1240,11 @@ impl App {
         else {
             return Task::none();
         };
+        // The task view's own Space-like toggle and its undo, on the keys
+        // the editor's commands have (`task_rows.rs`).
+        if let Some(task) = self.task_view_shortcut(id) {
+            return task;
+        }
         // The focused editor's key policy runs these; the same press
         // reaches here too, and must not act twice or outside the editor.
         if id.scope() == Scope::Editor {

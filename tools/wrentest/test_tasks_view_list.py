@@ -130,7 +130,7 @@ def test_counts_order_and_strikethrough(tmp_path: Path) -> None:
         assert descriptions(listing) == STANDUP_ROWS + ROADMAP_ROWS
         assert listing["shown"] == 12 and (listing["open"], listing["overdue"]) == (8, 1)
         assert listing["left_out"] == "Left out: 1 note (2 tasks, tasks: off)"
-        assert listing["hint"] == "↑↓ select · ↵ open"
+        assert listing["hint"] == "Space toggle · S D P · E edit · ↵ open · R refresh"
         assert [(chip["status"], chip["count"], chip["pressed"]) for chip in listing["chips"]] == [
             ("open", 7, False), ("doing", 1, False), ("done", 3, False), ("cancelled", 1, False)]
         rows = {row["description"]: row for row in listing["rows"]}

@@ -31,6 +31,9 @@
 //!   was drawn from, and does nothing once that listing is gone.
 //! - **The selection** survives a refresh by note, line and source line
 //!   ([`task_list::Listing::find`]), else stays at its place in the list.
+//! - **Writes** (item 10.4, `task_rows.rs`): keys, clicks and menus on a
+//!   row change its task in its note, each with a message with Undo, and a
+//!   row written stays where it stood until R refreshes the list.
 
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
@@ -63,7 +66,8 @@ pub(super) const LIST: &str = "task-list";
 /// The list's height before it is first drawn.
 const UNDRAWN_HEIGHT: f32 = 2000.0;
 /// What the footer says the list's keys are.
-pub(super) const HINT: &str = "\u{2191}\u{2193} select \u{b7} \u{21b5} open";
+pub(super) const HINT: &str =
+    "Space toggle \u{b7} S D P \u{b7} E edit \u{b7} \u{21b5} open \u{b7} R refresh";
 
 /// A control of the view, by what it does: what Tab walks, what a menu
 /// hangs under, and where the harness clicks.
@@ -82,6 +86,31 @@ pub enum Control {
     List,
     /// The source line of the list's entry at this index.
     Source(usize),
+    /// The row at this entry, and one of its cells.
+    Row(usize),
+    Cell(usize, Cell),
+}
+
+/// A cell of a row that a click or a key acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cell {
+    /// The status box: a click cycles it.
+    Box,
+    /// The priority: a click opens the priority menu.
+    Priority,
+    /// The due date: a click opens the calendar.
+    Due,
+}
+
+impl Cell {
+    #[cfg(feature = "smoke-test")]
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::Priority => "priority",
+            Self::Due => "due",
+        }
+    }
 }
 
 impl Control {
@@ -99,6 +128,8 @@ impl Control {
             Self::HideOld => "hide_old".into(),
             Self::List => "list".into(),
             Self::Source(entry) => format!("source:{entry}"),
+            Self::Row(entry) => format!("row:{entry}"),
+            Self::Cell(entry, cell) => format!("{}:{entry}", cell.name()),
         }
     }
 
@@ -121,17 +152,31 @@ pub(super) enum MenuFor {
     GroupBy,
     Due,
     Priority,
+    /// A row's status, priority or task menu, for the task it was opened
+    /// on, at the entry of the listing `generation`.
+    Row {
+        kind: super::task_menus::MenuKind,
+        target: super::task_target::RowTarget,
+        entry: usize,
+        generation: u64,
+    },
 }
 
 impl MenuFor {
     #[cfg(feature = "smoke-test")]
     pub(super) const fn name(&self) -> &'static str {
+        use super::task_menus::MenuKind;
         match self {
             Self::Scope(_) => "scope",
             Self::Owner(_) => "owner",
             Self::GroupBy => "group",
             Self::Due => "due",
             Self::Priority => "priority",
+            Self::Row { kind, .. } => match kind {
+                MenuKind::Status => "row_status",
+                MenuKind::Priority => "row_priority",
+                MenuKind::Task => "row_task",
+            },
         }
     }
 }
@@ -146,6 +191,17 @@ pub enum Click {
     },
     /// A row's source: open the note at its line.
     Open {
+        generation: u64,
+        entry: usize,
+    },
+    /// A cell of a row.
+    Cell {
+        generation: u64,
+        entry: usize,
+        cell: Cell,
+    },
+    /// A right-click on a row: its task menu.
+    RowMenu {
         generation: u64,
         entry: usize,
     },
@@ -181,6 +237,7 @@ struct Built {
     filters: TaskFilters,
     me: Vec<String>,
     today: Date,
+    held: Vec<task_list::Hold>,
 }
 
 /// The selected row: which task, under which group, at which entry.
@@ -223,6 +280,9 @@ pub(super) struct ListState {
     footer: (wren_core::tasks::Counts, Option<String>),
     /// Where the view's controls were last drawn.
     pub drawn: Drawn<Control>,
+    /// The rows written since the list was last refreshed, held where they
+    /// stood.
+    pub held: Vec<task_list::Hold>,
 }
 
 impl ListState {
@@ -374,7 +434,7 @@ impl App {
     }
 
     /// A note's title, as the model had it when the listing was built.
-    fn note_title(&self, note: wren_core::model::NoteId) -> &str {
+    pub(super) fn note_title(&self, note: wren_core::model::NoteId) -> &str {
         self.task_list.titles.get(&note).map_or("", String::as_str)
     }
 
@@ -385,6 +445,7 @@ impl App {
         let Some(scope) = self.task_view().cloned() else {
             self.task_list.menu = None;
             self.task_list.focus = None;
+            self.task_list.held.clear();
             return Task::none();
         };
         if self.task_list.menu.is_some() && !self.task_view_has_keys() {
@@ -396,13 +457,24 @@ impl App {
         let revision = session
             .tasks()
             .map_or(0, wren_core::tasks::TaskIndex::revision);
+        let workspace = (session.model().root.clone(), self.workspace_generation());
+        // Another scope, or another workspace, holds no row of this one.
+        if (self.task_list.built.as_ref())
+            .is_some_and(|old| old.scope != scope || old.workspace != workspace)
+        {
+            self.task_list.held.clear();
+        }
+        let Some(session) = &self.session else {
+            return Task::none();
+        };
         let built = Built {
-            workspace: (session.model().root.clone(), self.workspace_generation()),
+            workspace,
             filters: self.task_filters(&scope),
             scope,
             revision,
             me: self.preferences.settings.tasks_me.clone(),
             today: self.today(),
+            held: self.task_list.held.clone(),
         };
         if self.task_list.built.as_ref() == Some(&built) {
             return Task::none();
@@ -423,7 +495,14 @@ impl App {
             let title = titles.get(&record.note).map_or("", String::as_str);
             task_list::note_place(&record.path, title)
         };
-        let listing = Listing::build(records, &built.filters, &built.me, built.today, &place);
+        let listing = Listing::build_holding(
+            records,
+            &built.filters,
+            &built.me,
+            built.today,
+            &place,
+            &built.held,
+        );
         let footer = self.task_list_counts(&built.scope);
         let list = &mut self.task_list;
         list.listing = listing;
@@ -452,8 +531,13 @@ impl App {
             })
             .or_else(|| list.listing.rows().next());
         list.selected = entry.map(|entry| select(&list.listing, entry));
-        // The sources drawn belong to the old entries.
-        (list.drawn.borrow_mut()).retain(|(control, _)| !matches!(control, Control::Source(_)));
+        // The sources, rows and cells drawn belong to the old entries.
+        (list.drawn.borrow_mut()).retain(|(control, _)| {
+            !matches!(
+                control,
+                Control::Source(_) | Control::Row(_) | Control::Cell(..)
+            )
+        });
         let scroll = list
             .scroll
             .min((list.listing.height() - list.height.unwrap_or(0.0)).max(0.0));
@@ -686,6 +770,9 @@ impl App {
                 _ => (Task::none(), false),
             };
         }
+        if let Some(act) = super::task_rows::RowAct::of(press) {
+            return self.row_key(act);
+        }
         let page = ((self.list_height() / ROW_HEIGHT).floor() as isize - 1).max(1);
         let latin = press.key.to_latin(press.physical);
         let task = match (&press.key, latin) {
@@ -749,7 +836,9 @@ impl App {
             | Control::GroupBy
             | Control::Due
             | Control::Priority => self.open_list_menu(control),
-            Control::List | Control::Source(_) => Task::none(),
+            Control::List | Control::Source(_) | Control::Row(_) | Control::Cell(..) => {
+                Task::none()
+            }
         }
     }
 
@@ -766,6 +855,8 @@ impl App {
         let before = filters.clone();
         change(&mut filters);
         if filters != before {
+            // The rows held move to where the new filters put them.
+            self.task_list.held.clear();
             let _ = self.process_core(Op::SetTaskFilters {
                 scope: item,
                 filters,
@@ -908,15 +999,34 @@ impl App {
             }
             _ => return Task::none(),
         };
-        let anchor = self.task_list.drawn(control).unwrap_or(Rectangle::new(
+        let anchor = self
+            .task_list
+            .drawn(control)
+            .unwrap_or_else(|| self.unplaced_anchor());
+        self.open_host_menu(purpose, title.map(str::to_owned), rows, anchor)
+    }
+
+    /// Where a menu hangs whose control was never drawn.
+    pub(super) fn unplaced_anchor(&self) -> Rectangle {
+        Rectangle::new(
             iced::Point::new(self.viewport.width / 2.0 - 100.0, 96.0),
             iced::Size::ZERO,
-        ));
+        )
+    }
+
+    /// Open a menu over the view, under `anchor`, in place of any open.
+    pub(super) fn open_host_menu(
+        &mut self,
+        purpose: MenuFor,
+        title: Option<String>,
+        rows: Vec<Row>,
+        anchor: Rectangle,
+    ) -> Task<Message> {
         self.task_list.menus += 1;
         self.task_list.menu = Some(HostMenu::new(
             self.task_list.menus,
             purpose,
-            title.map(str::to_owned),
+            title,
             rows,
             anchor,
         ));
@@ -946,6 +1056,15 @@ impl App {
         let Some(menu) = self.task_list.menu.take() else {
             return Task::none();
         };
+        if let MenuFor::Row {
+            target,
+            entry,
+            generation,
+            ..
+        } = menu.purpose
+        {
+            return self.choose_row_menu(&target, entry, generation, row);
+        }
         let row = row as usize;
         match menu.purpose {
             MenuFor::Scope(choices) => {
@@ -992,6 +1111,7 @@ impl App {
                     self.change_filters(|filters| filters.priority = priority);
                 }
             }
+            MenuFor::Row { .. } => {}
         }
         Task::none()
     }
@@ -1128,6 +1248,30 @@ impl App {
                 self.task_list.focus = None;
                 let _ = self.select_entry(entry);
                 self.open_task_at(entry)
+            }
+            Click::Cell {
+                generation,
+                entry,
+                cell,
+            } => {
+                if !current(self, generation, entry) {
+                    return Task::none();
+                }
+                self.column = Column::Editor;
+                self.task_list.focus = None;
+                let selected = self.select_entry(entry);
+                let acted = self.click_cell(entry, cell);
+                Task::batch([selected, acted, self.column_focus()])
+            }
+            Click::RowMenu { generation, entry } => {
+                if !current(self, generation, entry) {
+                    return Task::none();
+                }
+                self.column = Column::Editor;
+                self.task_list.focus = None;
+                let selected = self.select_entry(entry);
+                let opened = self.open_row_menu(super::task_menus::MenuKind::Task, entry);
+                Task::batch([selected, opened, self.column_focus()])
             }
             Click::Control(control) => {
                 // A click leaves the keyboard with the list: only keys
@@ -1373,7 +1517,9 @@ impl App {
         let visible = listing.visible((list.scroll - height).max(0.0), 3.0 * height);
         // Only the rows built are drawn: forget where the others were.
         (list.drawn.borrow_mut()).retain(|(control, _)| match control {
-            Control::Source(entry) => visible.contains(entry),
+            Control::Source(entry) | Control::Row(entry) | Control::Cell(entry, _) => {
+                visible.contains(entry)
+            }
             _ => true,
         });
         let mut rows = column![Space::new().height(listing.tops[visible.start])].width(Fill);
@@ -1492,15 +1638,41 @@ impl App {
             }
             None => chrome::label("", 12, colors.faint),
         };
+        let cell = |content: Element<'a, Message>, cell: Cell| {
+            let area = mouse_area(content)
+                .on_press(Message::TaskView(Event::Click {
+                    serial,
+                    click: Click::Cell {
+                        generation,
+                        entry,
+                        cell,
+                    },
+                }))
+                .interaction(iced::mouse::Interaction::Pointer);
+            probe(area, &self.task_list.drawn, Control::Cell(entry, cell))
+        };
         let line = row![
-            container(task_box(record.status, &colors))
-                .center_x(26)
-                .center_y(ROW_HEIGHT - 4.0),
+            cell(
+                container(task_box(record.status, &colors))
+                    .center_x(26)
+                    .center_y(ROW_HEIGHT - 4.0)
+                    .into(),
+                Cell::Box
+            ),
             column![container(description).clip(true).width(Fill), source]
                 .spacing(2)
                 .width(Fill),
-            container(chrome::label(priority, 13, colors.text)).center_x(30),
-            container(due).width(112),
+            cell(
+                container(chrome::label(priority, 13, colors.text))
+                    .center_x(30)
+                    .center_y(ROW_HEIGHT - 4.0)
+                    .into(),
+                Cell::Priority
+            ),
+            cell(
+                container(due).width(112).center_y(ROW_HEIGHT - 4.0).into(),
+                Cell::Due
+            ),
         ]
         .spacing(4)
         .align_y(iced::Center)
@@ -1528,12 +1700,16 @@ impl App {
                     ..Default::default()
                 }
             });
-        mouse_area(container(card).padding([2, 8]).height(ROW_HEIGHT))
+        let area = mouse_area(container(card).padding([2, 8]).height(ROW_HEIGHT))
             .on_press(Message::TaskView(Event::Click {
                 serial,
                 click: Click::Select { generation, entry },
             }))
-            .into()
+            .on_right_press(Message::TaskView(Event::Click {
+                serial,
+                click: Click::RowMenu { generation, entry },
+            }));
+        probe(area, &self.task_list.drawn, Control::Row(entry)).into()
     }
 
     /// The pane's footer under the view: its counts, what it leaves out,
@@ -1633,6 +1809,7 @@ fn menu_control(purpose: &MenuFor) -> Control {
         MenuFor::GroupBy => Control::GroupBy,
         MenuFor::Due => Control::Due,
         MenuFor::Priority => Control::Priority,
+        MenuFor::Row { .. } => Control::List,
     }
 }
 

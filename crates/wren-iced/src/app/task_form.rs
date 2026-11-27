@@ -67,7 +67,7 @@ use wren_markdown::task::{self, DateField, Form, FormKind, Priority};
 use super::board::Surface;
 use super::calendar::{place, Event as CalendarEvent, FIELD as CALENDAR_FIELD};
 use super::commands::{CommandId, Disposition, Gateway};
-use super::task_target::{RowChange, RowTarget};
+use super::task_target::RowTarget;
 use super::{App, Message};
 use crate::date_field::FieldEvent;
 use crate::form_keys::{self, FormKey, Slot as KeySlot, SlotKind};
@@ -290,9 +290,6 @@ enum Target {
         engine: wren_editor::BackendKind,
     },
     /// A row of the task view.
-    // The task view's keys and menus open it (the client of item 10.4 of
-    // discovery/tasks-build.md); until then only the tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
     Row(RowTarget),
 }
 
@@ -471,9 +468,6 @@ impl App {
     /// Open the form for the task of a row of the task view, read from the
     /// row's line, and give its description field the keyboard. `None`
     /// with no task view showing, or where the line reads as no task.
-    // The task view's keys and menus open it (the client of item 10.4 of
-    // discovery/tasks-build.md); until then only the tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn open_row_task_form(&mut self, target: RowTarget) -> Option<Task<Message>> {
         if !self.preferences.tasks || self.dialog.is_some() || self.surface() != Surface::Tasks {
             return None;
@@ -965,7 +959,7 @@ impl App {
             Ok(change) => change,
             Err(problem) => return self.blocked(problem.to_string()).task,
         };
-        let written = self.write_task_row(target, &RowChange::Change(change));
+        let written = self.write_view_row(target, change, super::task_rows::What::Saved);
         if let Err(refusal) = &written.result {
             if let Some(open) = &mut self.task_form {
                 open.error = Some(refusal.message.clone());

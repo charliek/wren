@@ -438,11 +438,14 @@ def test_native_keys_in_the_view_reach_the_app_and_never_the_note(tmp_path: Path
                  description="no widget has the keyboard under the view")
 
         # Typing, editing keys, the editor's shortcuts and Escape: none
-        # reaches the note, and the view stays.
-        native.type_text(window, "typed at the view")
-        # Return would open the selected task's note (test_tasks_view_list.py).
-        native.keys(window, "BackSpace", "Delete", "space", "Escape",
-                    native_mod("b"), native_mod("d"), native_mod("Return"),
+        # reaches the note, and the view stays. The letters are none of the
+        # list's own keys: Return would open the selected task's note
+        # (test_tasks_view_list.py), and Space, Mod+Return and the single
+        # keys S, P, D, E, +, - and R act on the selected row
+        # (test_tasks_view_write.py).
+        native.type_text(window, "zoxy")
+        native.keys(window, "BackSpace", "Delete", "Escape",
+                    native_mod("b"), native_mod("d"),
                     native_mod("shift+Return"), native_mod("z"), native_mod("v"))
         native.settle_focus()
         shown(app, "group", GROUP, "Tasks", LIST)

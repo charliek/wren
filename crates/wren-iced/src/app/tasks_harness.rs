@@ -10,8 +10,9 @@
 //! `tasks.calendar_type`, the field's text set as a paste or an input
 //! method's commit sets it; and `tasks.calendar_click`, a click on a day,
 //! a quick pick, a month arrow, Clear, inside the card off its controls,
-//! or outside it. While it is open `editor.key` presses a key in its field
-//! ([`App::calendar_key`]).
+//! or outside it, or `{"target": "enter"}`, Enter in its field (over a task
+//! view's row, where `editor.key` is refused). While it is open over the
+//! note `editor.key` presses a key in its field ([`App::calendar_key`]).
 //!
 //! Suggestions (item 5.1): `tasks.owners`, the owners they offer after an
 //! `@`, best first, and whether those have been read from the index as it
@@ -52,6 +53,13 @@
 //! index holds now of the note the request was for, written or not:
 //! `hidden`, and each task's `line` and `source`), `can_undo`, and the
 //! action's `disposition` and `warning`.
+//!
+//! The view's own writes (item 10.4) are its keys (`{"key": …}`) and its
+//! clicks: `{"click": {"cell": {"row": n, "cell": "box" | "priority" |
+//! "due"}}}` clicks a cell of the nth row and `{"click": {"right": n}}`
+//! right-clicks it. With `{"list": true}` each row says whether it is
+//! `held` where a write left it, and where it and its cells were drawn
+//! (`bounds`, `cells`).
 
 use std::sync::Arc;
 
@@ -232,6 +240,8 @@ impl App {
             "clear" => return Err("Clear is not shown for a task with no due date".into()),
             "inside" => CalendarEvent::Refocus,
             "outside" => CalendarEvent::Outside,
+            // Enter in its field, as the field reports it.
+            "enter" => CalendarEvent::Field(crate::date_field::FieldEvent::Enter),
             other => return Err(format!("unknown calendar target {other:?}")),
         })
     }
@@ -700,6 +710,30 @@ impl App {
                 generation: self.task_list.generation,
                 entry,
             }
+        } else if let Some(entry) = row("right")? {
+            Click::RowMenu {
+                generation: self.task_list.generation,
+                entry,
+            }
+        } else if let Some(cell) = click.get("cell") {
+            use super::task_list_view::Cell;
+            let entry = cell
+                .get("row")
+                .and_then(Value::as_u64)
+                .ok_or("cell needs a row number")?;
+            let entry = (self.task_list.listing.rows().nth(entry as usize))
+                .ok_or_else(|| format!("the list has no row {entry}"))?;
+            let cell = match cell.get("cell").and_then(Value::as_str) {
+                Some("box") => Cell::Box,
+                Some("priority") => Cell::Priority,
+                Some("due") => Cell::Due,
+                other => return Err(format!("no cell {other:?}: box, priority or due")),
+            };
+            Click::Cell {
+                generation: self.task_list.generation,
+                entry,
+                cell,
+            }
         } else if let Some(label) = click.get("menu").and_then(Value::as_str) {
             let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
             let found = menu
@@ -720,7 +754,7 @@ impl App {
                 instance: menu.instance(),
             })
         } else {
-            return Err("click needs control, row, source, menu or outside".into());
+            return Err("click needs control, row, source, right, cell, menu or outside".into());
         };
         let serial = self.task_list.next_serial();
         Ok(self.update(Message::TaskView(Event::Click {
@@ -732,7 +766,7 @@ impl App {
     /// The task view's list, its filters, its menu and where its controls
     /// were drawn.
     fn task_list_snapshot(&self) -> Value {
-        use super::task_list_view::{due_cell, source_text, Control};
+        use super::task_list_view::{due_cell, source_text, Cell, Control};
         let Some(scope) = self.task_view() else {
             return Value::Null;
         };
@@ -775,6 +809,13 @@ impl App {
                     "source": source_text(record, &title, by_note),
                     "selected": list.selected.as_ref().is_some_and(|selected| selected.entry == entry),
                     "source_bounds": list.drawn(Control::Source(entry)).map(rectangle),
+                    "bounds": list.drawn(Control::Row(entry)).map(rectangle),
+                    "cells": {
+                        "box": list.drawn(Control::Cell(entry, Cell::Box)).map(rectangle),
+                        "priority": list.drawn(Control::Cell(entry, Cell::Priority)).map(rectangle),
+                        "due": list.drawn(Control::Cell(entry, Cell::Due)).map(rectangle),
+                    },
+                    "held": list.held.iter().any(|hold| hold.note == record.note && hold.line == record.line),
                 })
             })
             .collect();
@@ -818,7 +859,10 @@ impl App {
         });
         let mut bounds = serde_json::Map::new();
         for (control, at) in list.drawn.borrow().iter() {
-            if !matches!(control, Control::Source(_)) {
+            if !matches!(
+                control,
+                Control::Source(_) | Control::Row(_) | Control::Cell(..)
+            ) {
                 bounds.insert(control.name(), rectangle(*at));
             }
         }
