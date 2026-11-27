@@ -58,7 +58,7 @@ use super::task_list::{self, Entry, GroupKey, Listing, Piece, RowKey, HEADER_HEI
 use super::tasks_view::{Event, Scope};
 use super::{App, Message};
 use crate::ellipsis::ellipsis;
-use crate::list_keys::{list_keys, probe, Drawn, ListKey, Press};
+use crate::list_keys::{self, list_keys, probe, Drawn, ListKey, Press};
 use crate::{chrome, fonts, theme};
 
 /// The list's scrollable.
@@ -561,12 +561,9 @@ impl App {
             list.menu = None;
             list.describe = None;
         }
-        // An edit whose row the list no longer shows has nothing to show it in.
-        if (list.describe.as_ref())
-            .is_some_and(|describe| describe.entry_in(&list.listing).is_none())
-        {
-            list.describe = None;
-        }
+        // An edit follows its row, and ends when the list no longer shows it.
+        self.follow_describe();
+        let list = &mut self.task_list;
         let previous = list.selected.take();
         let entry = previous
             .as_ref()
@@ -930,7 +927,7 @@ impl App {
 
     /// Change the view's filters with `change`, remembering them for its
     /// scope when they differ.
-    fn change_filters(&mut self, change: impl FnOnce(&mut TaskFilters)) {
+    pub(super) fn change_filters(&mut self, change: impl FnOnce(&mut TaskFilters)) {
         let Some(scope) = self.task_view().cloned() else {
             return;
         };
@@ -1306,13 +1303,18 @@ impl App {
                 self.column_focus()
             }
             Event::Scrolled { y, height } => {
+                // The user scrolling the list ends an edit in place, writing
+                // nothing, before any key after it in the batch: only the
+                // list's own scroll (the reveal of the row as the field
+                // opens), which is where the view last put it, keeps it.
+                if (y - self.task_list.scroll).abs() > 0.5 && self.cancel_describe() {
+                    self.task_list.stopped = true;
+                }
                 self.task_list.scroll = y;
                 self.task_list.height = Some(height);
-                // An edit whose row is scrolled out of the rows built would
-                // have no field.
+                // An edit whose row is out of the rows built has no field.
                 if (self.task_list.describe.as_ref())
-                    .and_then(|describe| describe.entry_in(&self.task_list.listing))
-                    .is_some_and(|entry| !self.built_rows().contains(&entry))
+                    .is_some_and(|describe| !self.built_rows().contains(&describe.entry))
                 {
                     self.task_list.describe = None;
                 }
@@ -1359,8 +1361,12 @@ impl App {
                         .map(|row| (instance, row));
                     return Task::none();
                 }
+                // The exception is spent on the one edit it lets open.
                 let second = matches!(click, Click::Describe { generation, entry }
                     if self.task_list.selected_in_batch == Some((generation, entry)));
+                if second {
+                    self.task_list.selected_in_batch = None;
+                }
                 if !first && !second {
                     return Task::none();
                 }
@@ -1780,19 +1786,24 @@ impl App {
         let generation = self.task_list.generation;
         // The description, or the field that edits it in place; a
         // double-click on the description opens that.
+        // The click history behind a double-click is this row's in this
+        // listing: a row that takes its place after a rebuild starts afresh.
         let description: Element<'a, Message> =
-            match (self.task_list.describe.as_ref()).filter(|describe| describe.is_of(record)) {
+            match (self.task_list.describe.as_ref()).filter(|describe| describe.entry == entry) {
                 Some(describe) => self.describe_field(describe, serial),
-                None => mouse_area(container(description).clip(true).width(Fill))
-                    .on_press(Message::TaskView(Event::Click {
-                        serial,
-                        click: Click::Select { generation, entry },
-                    }))
-                    .on_double_click(Message::TaskView(Event::Click {
-                        serial,
-                        click: Click::Describe { generation, entry },
-                    }))
-                    .into(),
+                None => list_keys::keyed(
+                    mouse_area(container(description).clip(true).width(Fill))
+                        .on_press(Message::TaskView(Event::Click {
+                            serial,
+                            click: Click::Select { generation, entry },
+                        }))
+                        .on_double_click(Message::TaskView(Event::Click {
+                            serial,
+                            click: Click::Describe { generation, entry },
+                        })),
+                    (generation, entry),
+                )
+                .into(),
             };
         let description = probe(
             description,

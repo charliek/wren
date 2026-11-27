@@ -10,24 +10,29 @@
 //!   is no one's: it is taken, so the text input does not give up the
 //!   keyboard for it.
 //! - Tab and Shift+Tab do nothing, so the keyboard stays in the field.
-//! - Every other key, the shortcuts included, is the text input's. Each
-//!   shortcut (Ctrl, Alt or the logo key held, or a function key; AltGr's
-//!   text is no shortcut) is also reported, as [`LineEvent::Shortcut`], so
-//!   the host knows which of the app's copies of its keys came from the
-//!   field.
+//! - Tab or Escape with Ctrl, Alt or the logo key that the keymap gives an
+//!   `edit.*` action is that edit ([`crate::field_keys`]), as in any field.
+//! - Every other key, the shortcuts included, is the text input's.
 //!
-//! While an input method composes (its preedit holds text), Enter is taken
-//! and does nothing, so a composition is never written half made, and a
-//! plain Escape is the input method's, reported as
-//! [`LineEvent::HeldEscape`] so the host's own key handling, which hears of
-//! every plain Escape, knows it was no one's.
+//! Each shortcut (Ctrl, Alt or the logo key held, or a function key;
+//! AltGr's text is no shortcut) is reported, at its place in the batch, as
+//! [`LineEvent::Shortcut`], `held` when the field took it (it does nothing
+//! or is the field's own) or came after the field closed: the host runs
+//! the app's command for one that is not held there and then, and drops
+//! the app's copy of every one.
+//!
+//! While an input method composes (its preedit holds text), Enter (with
+//! any modifiers) and Tab are taken and do nothing, so a composition is
+//! never written half made, and a plain Escape is the input method's,
+//! reported as [`LineEvent::HeldEscape`] so the host's own key handling,
+//! which hears of every plain Escape, knows it was no one's.
 //!
 //! **A close is a routing boundary.** Escape, and an Enter with text in
 //! the field (not white space alone), close it: the rest of its batch was
 //! typed before the user could see the field go, and is dropped, never
 //! typed. A plain Escape among it is reported as [`LineEvent::HeldEscape`]
-//! and a shortcut as a [`LineEvent::Shortcut`] that came after the close,
-//! so the host drops its copies too. An Enter on an empty field closes
+//! and a shortcut as a held [`LineEvent::Shortcut`], so the host drops its
+//! copies too. An Enter on an empty field closes
 //! nothing, and the field keeps the keyboard.
 //!
 //! The field reports [`LineEvent::Blur`] whenever it loses the keyboard
@@ -67,9 +72,9 @@ pub enum LineEvent {
     /// A plain Escape that is no one's: the input method's while it
     /// composed, or one after the field closed in its batch.
     HeldEscape,
-    /// A shortcut pressed while the field had the keyboard, `closed` when
-    /// it came after the field closed in its batch.
-    Shortcut { accel: Accel, closed: bool },
+    /// A shortcut pressed while the field had the keyboard, `held` when
+    /// the field took it or it came after the field closed in its batch.
+    Shortcut { accel: Accel, held: bool },
     /// The field lost the keyboard inside the window.
     Blur,
     /// An input method started (`true`) or stopped composing in the field.
@@ -147,7 +152,7 @@ pub fn route(key: &Key, modifiers: Modifiers, composing: bool) -> Option<Option<
     let plain_escape = wren_editor::is_plain_escape(modifiers);
     if composing {
         return match named {
-            Named::Enter => Some(None),
+            Named::Enter | Named::Tab => Some(None),
             Named::Escape if plain_escape => Some(Some(LineEvent::HeldEscape)),
             Named::Escape => Some(None),
             _ => None,
@@ -331,10 +336,7 @@ where
                     }
                 }
                 if let Some(accel) = shortcut(event) {
-                    shell.publish((self.on_event)(LineEvent::Shortcut {
-                        accel,
-                        closed: true,
-                    }));
+                    shell.publish((self.on_event)(LineEvent::Shortcut { accel, held: true }));
                 }
                 if !matches!(event, Event::Window(_)) {
                     shell.capture_event();
@@ -359,13 +361,25 @@ where
                     | input_method::Event::Opened,
                 ) => state.composing = false,
                 Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if before => {
+                    // Tab or Escape with a modifier that the keymap gives an
+                    // edit is that edit, the field keys' to hand the input.
+                    let edit = !state.composing
+                        && matches!(key, Key::Named(Named::Tab | Named::Escape))
+                        && !wren_editor::is_plain_escape(*modifiers)
+                        && !(modifiers.is_empty() || *modifiers == Modifiers::SHIFT)
+                        && self.keys.rewrite(event).is_some();
+                    let taken = if edit {
+                        None
+                    } else {
+                        route(key, *modifiers, state.composing)
+                    };
                     if let Some(accel) = shortcut(event) {
                         shell.publish((self.on_event)(LineEvent::Shortcut {
                             accel,
-                            closed: false,
+                            held: taken.is_some(),
                         }));
                     }
-                    if let Some(taken) = route(key, *modifiers, state.composing) {
+                    if let Some(taken) = taken {
                         let closes = match &taken {
                             Some(LineEvent::Escape) => true,
                             Some(LineEvent::Enter) => self.enter_closes(),
@@ -660,10 +674,10 @@ mod tests {
         LineEvent::Typed(value.into())
     }
 
-    fn shortcut(trigger: &str, closed: bool) -> LineEvent {
+    fn shortcut(trigger: &str, held: bool) -> LineEvent {
         LineEvent::Shortcut {
             accel: wren_core::keybind::parse_trigger(trigger).expect("a trigger"),
-            closed,
+            held,
         }
     }
 
@@ -770,14 +784,19 @@ mod tests {
             press(Key::Character("z".into()), Modifiers::CTRL, None),
             press(Key::Named(Named::F2), Modifiers::empty(), None),
             press(Key::Named(Named::Enter), Modifiers::CTRL, None),
+            press(Key::Named(Named::Escape), Modifiers::CTRL, None),
+            press(Key::Named(Named::Tab), Modifiers::CTRL, None),
             typed("s"),
         ]);
+        // Ctrl+Escape and Ctrl+Tab are taken, doing nothing: held.
         assert_eq!(
             messages,
             [
                 shortcut("ctrl+z", false),
                 shortcut("f2", false),
                 shortcut("ctrl+enter", false),
+                shortcut("ctrl+escape", true),
+                shortcut("ctrl+tab", true),
                 text("Orders"),
             ]
         );
@@ -806,6 +825,25 @@ mod tests {
             ]
         );
         assert_eq!(captured, [false, true, true, true, true, true]);
+        // Tab, and Enter or Escape with a modifier, are the composition's
+        // too: taken, and their app copies held.
+        let mut line = Field::new("Order ");
+        let (messages, captured) = line.batch(&[
+            preedit("ふ"),
+            named(Named::Tab),
+            press(Key::Named(Named::Enter), Modifiers::CTRL, None),
+            press(Key::Named(Named::Escape), Modifiers::ALT, None),
+        ]);
+        assert_eq!(
+            messages,
+            [
+                LineEvent::Composing(true),
+                shortcut("ctrl+enter", true),
+                shortcut("alt+escape", true),
+            ]
+        );
+        assert_eq!(captured, [false, true, true, true]);
+        assert!(line.focused());
         // A preedit that empties again ends the composition.
         let mut line = Field::new("Order");
         let (messages, _) = line.batch(&[preedit("x"), preedit(""), named(Named::Escape)]);
@@ -866,6 +904,44 @@ mod tests {
         let mut kept = Kept(Some("tea".into()));
         let (messages, _) = line.batch_with(&[chord("v", Modifiers::ALT)], None, &mut kept);
         assert_eq!(messages, [shortcut("alt+v", false), text("Order tea")]);
+        // Tab or Escape with a modifier that the keymap gives `edit.paste`
+        // pastes; plain Tab and Escape keep their meaning.
+        let scheme = wren_core::keybind::Scheme::new(
+            wren_core::keybind::Platform::Linux,
+            LinuxModifier::Ctrl,
+        );
+        let edits = [
+            (
+                scheme.parse("alt+escape").unwrap(),
+                wren_editor::EditKey::Paste,
+            ),
+            (
+                scheme.parse("ctrl+tab").unwrap(),
+                wren_editor::EditKey::Paste,
+            ),
+        ];
+        let keys = FieldKeys::new(scheme, edits, []);
+        let mut line = Field::with_keys("Order ", keys);
+        let (messages, _) = line.batch_with(
+            &[
+                press(Key::Named(Named::Escape), Modifiers::ALT, None),
+                press(Key::Named(Named::Tab), Modifiers::CTRL, None),
+                named(Named::Tab),
+                named(Named::Escape),
+            ],
+            None,
+            &mut kept,
+        );
+        assert_eq!(
+            messages,
+            [
+                shortcut("alt+escape", false),
+                text("Order tea"),
+                shortcut("ctrl+tab", false),
+                text("Order teatea"),
+                LineEvent::Escape,
+            ]
+        );
         // In Ctrl mode Alt+V is no paste.
         let mut line = Field::with_keys("Order ", linux(LinuxModifier::Ctrl));
         let (messages, _) = line.batch_with(&[chord("v", Modifiers::ALT)], None, &mut kept);

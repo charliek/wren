@@ -391,6 +391,173 @@ where
     }
 }
 
+/// `content` whose widget state is kept only while `key` stays the same:
+/// a new key starts it afresh, as a widget that was never there. A list
+/// that builds its rows in place keys each by what it shows, so a row that
+/// takes another's place inherits none of its state (a pending click).
+pub fn keyed<'a, K: PartialEq + Clone + 'static, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+    key: K,
+) -> Keyed<'a, K, Message, Theme, Renderer> {
+    Keyed {
+        content: content.into(),
+        key,
+    }
+}
+
+pub struct Keyed<'a, K, Message, Theme, Renderer> {
+    content: Element<'a, Message, Theme, Renderer>,
+    key: K,
+}
+
+impl<K: PartialEq + Clone + 'static, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for Keyed<'_, K, Message, Theme, Renderer>
+where
+    Renderer: renderer::Renderer,
+{
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<K>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(self.key.clone())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        if *tree.state.downcast_ref::<K>() == self.key {
+            tree.diff_children(std::slice::from_ref(&self.content));
+        } else {
+            tree.state = tree::State::new(self.key.clone());
+            tree.children = vec![Tree::new(&self.content)];
+        }
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+impl<'a, K: PartialEq + Clone + 'static, Message, Theme, Renderer>
+    From<Keyed<'a, K, Message, Theme, Renderer>> for Element<'a, Message, Theme, Renderer>
+where
+    Message: 'a,
+    Theme: 'a,
+    Renderer: renderer::Renderer + 'a,
+{
+    fn from(keyed: Keyed<'a, K, Message, Theme, Renderer>) -> Self {
+        Element::new(keyed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use iced::advanced::layout;
@@ -545,5 +712,47 @@ mod tests {
             reported(&messages),
             [("Character(\"j\")".to_owned(), true, true)]
         );
+    }
+
+    #[test]
+    fn a_keyed_row_taking_anothers_place_inherits_no_click() {
+        // Two presses on the same place: a double-click while the key is
+        // the same; none when another row's key took its place between.
+        let presses = |second: (u64, usize)| {
+            let element = |key: (u64, usize)| -> Element<'static, u32, Theme, ()> {
+                keyed(
+                    iced::widget::mouse_area(iced::widget::Space::new().width(100).height(20))
+                        .on_press(1)
+                        .on_double_click(2),
+                    key,
+                )
+                .into()
+            };
+            let mut tree = Tree::new(element((1, 0)));
+            let mut messages = Vec::new();
+            for key in [(1, 0), second] {
+                let mut element = element(key);
+                element.as_widget().diff(&mut tree);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &(),
+                    &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+                );
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Layout::new(&node),
+                    mouse::Cursor::Available(Point::new(10.0, 10.0)),
+                    &(),
+                    &mut iced::advanced::clipboard::Null,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+                );
+            }
+            messages
+        };
+        assert_eq!(presses((1, 0)), [1, 1, 2]);
+        assert_eq!(presses((2, 0)), [1, 1]);
     }
 }

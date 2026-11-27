@@ -705,17 +705,18 @@ impl App {
             iced::keyboard::key::NativeCode::Unidentified,
         );
         let mut tasks = Vec::new();
+        let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
+        let taken = crate::line_field::route(&key, modifiers, composing);
         if let Some(accel) = crate::keys::shortcut(&key, physical, modifiers) {
             tasks.push(send(
                 self,
                 crate::line_field::LineEvent::Shortcut {
                     accel,
-                    closed: false,
+                    held: taken.is_some(),
                 },
             ));
         }
-        let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
-        let captured = match crate::line_field::route(&key, modifiers, composing) {
+        let captured = match taken {
             Some(taken) => {
                 if let Some(event) = taken {
                     tasks.push(send(self, event));
@@ -1066,7 +1067,7 @@ impl App {
             "focus": list.focus.map_or_else(|| "list".to_owned(), Control::name),
             "menu": menu,
             "describe": list.describe.as_ref().map(|describe| {
-                let entry = describe.entry_in(listing);
+                let entry = Some(describe.entry);
                 json!({
                     "row": entry.and_then(|entry| listing.rows().position(|row| row == entry)),
                     "text": describe.text,

@@ -24,13 +24,25 @@
 //!   comes back.
 //! - **Tab** does nothing: the keyboard stays in the field.
 //! - **One at a time.** Opening a menu, the calendar, the form, a filter,
-//!   R, another scope or leaving the view, and any click in the view, ends
+//!   another scope or leaving the view, and any click in the view, ends
 //!   the edit first, writing nothing (`App::sync_task_list` holds the rest).
-//! - **The app's shortcuts** stay the app's while the field is open, but
-//!   for the view's own (its done toggle and its undo), whose copies the
-//!   field's keys never reach: `edit.undo`'s chord in the field is the
-//!   field's, never an undo of a task write. Keys after Enter or Escape in
-//!   the batch that closed the field are dropped, their copies too.
+//! - **The app's shortcuts** stay the app's while the field is open, and
+//!   run at their place in the batch, as the field reports them: one that
+//!   takes the keyboard from the view (the palette, a dialog, another
+//!   surface) ends the edit there, writing nothing, so an Enter after it
+//!   in the batch writes nothing, and the app's copy is spent. The view's
+//!   own chords (its toggle and undo) and the editor's (the field's own
+//!   edits) run nothing: `edit.undo`'s chord in the field never undoes a
+//!   task write. Keys after Enter or Escape in the batch that closed the
+//!   field are dropped, their copies too.
+//! - **One field, on one row.** The field is drawn on the one row it was
+//!   opened on, under its group (a task under two owners shows twice), and
+//!   follows that task through each rebuild of the list by its note and
+//!   its line's text; when the list no longer shows it there, or the user
+//!   scrolls the list, the edit ends, writing nothing. The write itself
+//!   expects the line the row listed, so a task changed since is refused.
+//! - **Letters are the field's**, R included: the list's keys wait until
+//!   the field closes.
 //! - **An input method** composes in the field as in any of iced's text
 //!   inputs; Enter while it composes is taken and does nothing. Closed by
 //!   a click while one composes, what it commits next has no field to go
@@ -39,12 +51,11 @@
 
 use iced::{Element, Fill, Task};
 use wren_core::keybind::{Accel, Mods};
-use wren_core::tasks::TaskRecord;
 use wren_markdown::task::Change;
 
 use super::commands::CommandId;
 use super::notice::{Notice, Part};
-use super::task_list::Listing;
+use super::task_list::{Entry, GroupKey, Listing, RowKey};
 use super::task_list_view::AppCopy;
 use super::task_rows::What;
 use super::task_target::RowTarget;
@@ -62,8 +73,17 @@ pub(super) const EMPTY: &str = "A task needs a description; nothing was written"
 /// A row's description being edited in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Describe {
-    /// The row's task, as listed when the field opened.
+    /// The row's task, as listed when the field opened: what the write
+    /// expects to find.
     pub target: RowTarget,
+    /// The occurrence of the row being edited, followed through each
+    /// rebuild of the listing: the task by note and source line, under the
+    /// group it was opened in (a row under two owners shows twice).
+    pub key: RowKey,
+    pub group: GroupKey,
+    /// Its entry in the listing as last built: the one place the field is
+    /// drawn.
+    pub entry: usize,
     /// Where the task's box is on its line, as the index found it.
     pub boxed: usize,
     /// The field's text.
@@ -76,18 +96,20 @@ pub(super) struct Describe {
 }
 
 impl Describe {
-    /// Whether `record` is the row being edited.
-    pub(super) fn is_of(&self, record: &TaskRecord) -> bool {
-        record.note == self.target.note && record.line == self.target.line
+    /// The entry of the occurrence being edited in `listing`, rebuilt: the
+    /// same task (its note and its source line, nearest the line it was
+    /// on) under the same group; `None` once it is gone from there.
+    pub(super) fn find_in(&self, listing: &Listing) -> Option<usize> {
+        let entry = listing.find(&self.key, Some(&self.group))?;
+        (group_of(listing, entry) == Some(&self.group)).then_some(entry)
     }
+}
 
-    /// The entry of the row being edited in `listing`.
-    pub(super) fn entry_in(&self, listing: &Listing) -> Option<usize> {
-        (listing.rows()).find(|&entry| {
-            listing
-                .record(entry)
-                .is_some_and(|record| self.is_of(record))
-        })
+/// The key of the group the row at `entry` is shown under.
+fn group_of(listing: &Listing, entry: usize) -> Option<&GroupKey> {
+    match listing.entries.get(entry)? {
+        Entry::Row { group, .. } => Some(&listing.groups[*group].key),
+        Entry::Header(_) => None,
     }
 }
 
@@ -120,7 +142,11 @@ impl App {
             return Task::none();
         };
         let target = RowTarget::of(record);
+        let key = RowKey::of(record);
         let boxed = record.box_at;
+        let Some(group) = group_of(&self.task_list.listing, entry).cloned() else {
+            return Task::none();
+        };
         let Some(text) = super::task_menus::row_task(&target.expect, boxed)
             .map(|line| line.description_text().to_owned())
         else {
@@ -131,6 +157,9 @@ impl App {
         self.task_list.describes += 1;
         self.task_list.describe = Some(Describe {
             target,
+            key,
+            group,
+            entry,
             boxed,
             text,
             instance: self.task_list.describes,
@@ -145,13 +174,54 @@ impl App {
         self.task_list.describe.take().is_some()
     }
 
-    /// Whether the app's key handling reads `accel` as one of the view's own
-    /// shortcuts: its done toggle and its undo.
-    fn task_view_reads(&self, accel: &Accel) -> bool {
-        matches!(
-            (self.preferences.keymap.action(accel)).and_then(CommandId::parse),
-            Some(CommandId::ToggleTask | CommandId::EditUndo)
-        )
+    /// Follow the occurrence being edited into the listing just built, or
+    /// close the field, writing nothing, once it is gone from it.
+    pub(super) fn follow_describe(&mut self) {
+        let list = &mut self.task_list;
+        let Some(describe) = &mut list.describe else {
+            return;
+        };
+        match describe.find_in(&list.listing) {
+            Some(entry) => {
+                describe.entry = entry;
+                if let Some(record) = list.listing.record(entry) {
+                    describe.key.line = record.line;
+                }
+            }
+            None => list.describe = None,
+        }
+    }
+
+    /// Whether the field can still have the keyboard: the view has it, with
+    /// no menu or control over the list.
+    fn describe_holds(&self) -> bool {
+        self.task_view_has_keys() && self.task_list.menu.is_none() && self.task_list.focus.is_none()
+    }
+
+    /// A shortcut the open field saw and did not take: the app's command
+    /// for it runs here, at its place in the batch, and its copy is spent.
+    /// One that takes the keyboard from the view (the palette, a dialog,
+    /// another surface) closes the field first, writing nothing, so an
+    /// Enter later in the batch writes nothing either. The view's own
+    /// chords (its toggle and undo) and the editor's (the field's edits)
+    /// run nothing.
+    fn describe_shortcut(&mut self, accel: Accel) -> Task<Message> {
+        self.task_list
+            .copies
+            .push_back((AppCopy::Shortcut(accel.clone()), true));
+        let id = (self.preferences.keymap.action(&accel)).and_then(CommandId::parse);
+        let Some(id) = id.filter(|id| {
+            id.scope() == super::commands::Scope::App
+                && !matches!(id, CommandId::ToggleTask | CommandId::EditUndo)
+        }) else {
+            return Task::none();
+        };
+        let task = self.run_shortcut(id);
+        if !self.describe_holds() || self.task_view().is_none() {
+            self.task_list.describe = None;
+            self.task_list.stopped = true;
+        }
+        task
     }
 
     /// What the field numbered `instance` reported, in the batch `serial`.
@@ -162,18 +232,22 @@ impl App {
         event: LineEvent,
     ) -> Task<Message> {
         self.enter_batch(serial);
+        let current = (self.task_list.describe.as_ref())
+            .is_some_and(|describe| describe.instance == instance);
         // The app's key handling hears its own copy of each of these after
         // the batch: an Escape the field took or held, and a shortcut it
-        // saw, which is dropped once the field closed or when the view
-        // would read it.
+        // saw, whose command runs here, in its place, unless the field held
+        // it or has closed. Each copy is spent.
         match &event {
             LineEvent::Escape | LineEvent::HeldEscape => {
                 self.task_list.copies.push_back((AppCopy::Escape, true));
             }
-            LineEvent::Shortcut { accel, closed } => {
-                let drop = *closed || self.task_view_reads(accel);
-                (self.task_list.copies).push_back((AppCopy::Shortcut(accel.clone()), drop));
-                return Task::none();
+            LineEvent::Shortcut { accel, held } => {
+                if *held || !current {
+                    (self.task_list.copies).push_back((AppCopy::Shortcut(accel.clone()), true));
+                    return Task::none();
+                }
+                return self.describe_shortcut(accel.clone());
             }
             _ => {}
         }
@@ -682,11 +756,11 @@ mod tests {
                 LineEvent::Enter,
                 LineEvent::Shortcut {
                     accel: toggle,
-                    closed: true,
+                    held: true,
                 },
                 LineEvent::Shortcut {
                     accel: undo.clone(),
-                    closed: true,
+                    held: true,
                 },
             ],
         );
@@ -715,12 +789,12 @@ mod tests {
                 &[
                     LineEvent::Shortcut {
                         accel: paste,
-                        closed: false,
+                        held: false,
                     },
                     typed("Order lunch @sam tea"),
                     LineEvent::Shortcut {
                         accel: undo,
-                        closed: false,
+                        held: false,
                     },
                 ],
             );
@@ -735,7 +809,7 @@ mod tests {
                 &[
                     LineEvent::Shortcut {
                         accel: undo,
-                        closed: false,
+                        held: false,
                     },
                     LineEvent::Enter,
                 ],
@@ -796,5 +870,203 @@ mod tests {
         let _ = app.dispatch(Command::Run(CommandId::Forward));
         let _ = app.update(Message::Tick);
         assert_eq!(field_text(&app), None);
+    }
+
+    /// A chord the keymap binds to `action`: a letter with Ctrl, Alt or
+    /// the logo key, and Shift or not.
+    fn bound(app: &App, action: &str) -> Accel {
+        let mods = [
+            Modifiers::CTRL,
+            Modifiers::ALT,
+            Modifiers::LOGO,
+            Modifiers::CTRL | Modifiers::SHIFT,
+            Modifiers::ALT | Modifiers::SHIFT,
+            Modifiers::LOGO | Modifiers::SHIFT,
+        ];
+        ('a'..='z')
+            .flat_map(|letter| mods.map(|modifiers| (letter, modifiers)))
+            .filter_map(|(letter, modifiers)| {
+                accel(&press(
+                    Key::Character(letter.to_string().into()),
+                    modifiers,
+                    None,
+                ))
+            })
+            .find(|accel| app.preferences.keymap.action(accel) == Some(action))
+            .unwrap_or_else(|| panic!("{action} is bound to no letter chord"))
+    }
+
+    #[test]
+    fn a_shortcut_that_takes_the_keyboard_ends_the_edit_at_its_place_in_the_batch() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea @sam")]);
+        // The palette's chord, then Enter, in one batch: the palette opens,
+        // the edit ends before Enter, and Enter writes nothing.
+        let palette = bound(&app, "palette.commands");
+        field_batch(
+            &mut app,
+            &[
+                LineEvent::Shortcut {
+                    accel: palette,
+                    held: false,
+                },
+                LineEvent::Enter,
+            ],
+        );
+        assert!(app.palette.is_some(), "the chord ran, once");
+        assert_eq!(field_text(&app), None);
+        assert_eq!(on_disk(&directory, "B"), B);
+        assert!(app.task_list.copies.is_empty(), "its copy was spent");
+        // A chord the field held (taken while an input method composed)
+        // runs nothing.
+        let _ = app.update(Message::Escape);
+        let _ = app.update(Message::Tick);
+        list_batch(&mut app, &[f2()]);
+        let palette = bound(&app, "palette.commands");
+        field_batch(
+            &mut app,
+            &[LineEvent::Shortcut {
+                accel: palette,
+                held: true,
+            }],
+        );
+        assert!(app.palette.is_none());
+        assert!(field_text(&app).is_some());
+    }
+
+    #[test]
+    fn a_row_under_two_owners_edits_in_the_one_it_was_opened_in() {
+        let (_directory, mut app) = fixture();
+        std::fs::write(
+            _directory.path().join("workspace/Work/Tasks/B.md"),
+            "# B\n\n- [ ] Order lunch @sam @kim\n",
+        )
+        .unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        app.change_filters(|filters| filters.group_by = wren_core::tasks_file::GroupBy::Owner);
+        let _ = app.update(Message::Tick);
+        let listing = &app.task_list.listing;
+        let shown: Vec<usize> = (listing.rows())
+            .filter(|&row| {
+                listing
+                    .record(row)
+                    .unwrap()
+                    .description
+                    .starts_with("Order lunch")
+            })
+            .collect();
+        assert_eq!(shown.len(), 2, "under each owner");
+        let second = shown[1];
+        let generation = app.task_list.generation;
+        let serial = app.task_list.next_serial();
+        for click in [
+            Click::Select {
+                generation,
+                entry: second,
+            },
+            Click::Describe {
+                generation,
+                entry: second,
+            },
+        ] {
+            let _ = app.update(Message::TaskView(Event::Click { serial, click }));
+        }
+        assert_eq!(app.task_list.describe.as_ref().unwrap().entry, second);
+        // A rebuild keeps it on that occurrence.
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        list_batch(&mut app, &[]);
+        assert_eq!(app.task_list.describe.as_ref().unwrap().entry, second);
+    }
+
+    #[test]
+    fn an_edit_ends_when_its_task_leaves_the_line_for_another() {
+        let (directory, mut app) = fixture_with("");
+        let b = directory.path().join("workspace/Work/Tasks/B.md");
+        std::fs::write(&b, "# B\n\n- [ ] Order lunch\n- [ ] Call Kim\n").unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea")]);
+        // Another program takes the line out: Call Kim moves onto it.
+        std::fs::write(&b, "# B\n\n- [ ] Call Kim, today\n").unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        assert_eq!(
+            field_text(&app),
+            None,
+            "the edit never moves to another task"
+        );
+        assert_eq!(on_disk(&directory, "B"), "# B\n\n- [ ] Call Kim, today\n");
+        // A task that only moved down keeps its edit, and the write finds it.
+        std::fs::write(&b, "# B\n\n- [ ] Order lunch\n").unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea")]);
+        std::fs::write(&b, "# B\n\nIntro, longer.\n\n- [ ] Order lunch\n").unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        assert_eq!(field_text(&app).as_deref(), Some("Order tea"));
+        field_batch(&mut app, &[LineEvent::Enter]);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            "# B\n\nIntro, longer.\n\n- [ ] Order tea\n"
+        );
+    }
+
+    #[test]
+    fn the_user_scrolling_ends_the_edit_before_a_later_enter() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea @sam")]);
+        // The list's own scroll, where the view put it: the edit stays.
+        let at = app.task_list.scroll;
+        let serial = app.task_list.next_serial();
+        let _ = app.update(Message::TaskView(Event::Scrolled {
+            y: at,
+            height: 400.0,
+        }));
+        assert!(field_text(&app).is_some());
+        // The user's scroll, then Enter, in one batch: nothing written.
+        let instance = app.task_list.describes;
+        let _ = app.update(Message::TaskView(Event::Scrolled {
+            y: at + 10.0,
+            height: 400.0,
+        }));
+        let _ = app.update(Message::TaskView(Event::Field {
+            serial,
+            instance,
+            event: LineEvent::Enter,
+        }));
+        assert_eq!(field_text(&app), None);
+        assert_eq!(on_disk(&directory, "B"), B);
+    }
+
+    #[test]
+    fn four_presses_in_one_batch_open_the_field_once() {
+        let (_directory, mut app) = fixture();
+        let entry = entry(&app, "Order lunch");
+        let generation = app.task_list.generation;
+        let before = app.task_list.describes;
+        let serial = app.task_list.next_serial();
+        let select = Click::Select { generation, entry };
+        let describe = Click::Describe { generation, entry };
+        for click in [
+            select.clone(),
+            select.clone(),
+            describe.clone(),
+            select.clone(),
+            select,
+            describe,
+        ] {
+            let _ = app.update(Message::TaskView(Event::Click { serial, click }));
+        }
+        assert_eq!(app.task_list.describes, before + 1);
+        assert!(field_text(&app).is_some());
     }
 }
