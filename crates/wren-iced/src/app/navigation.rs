@@ -33,6 +33,7 @@ impl App {
         self.widths = Widths::from_state(session.state());
         self.clear_task_views();
         self.clear_task_writes();
+        self.notice = None;
         self.focus = false;
         self.column = super::columns::Column::Editor;
         self.fold = 0;

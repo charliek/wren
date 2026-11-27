@@ -229,6 +229,16 @@ pub(super) enum Seen {
 pub(super) struct Writes {
     undo: Vec<Inverse>,
     pub(super) seen: Option<Seen>,
+    /// How many inverses were ever recorded, which names the newest.
+    recorded: u64,
+}
+
+/// Names the write that is next to undo, so that something offering to
+/// undo one write (a message's Undo) never undoes another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WriteMark {
+    recorded: u64,
+    depth: usize,
 }
 
 impl Writes {
@@ -237,6 +247,16 @@ impl Writes {
             self.undo.remove(0);
         }
         self.undo.push(inverse);
+        self.recorded += 1;
+    }
+
+    /// The mark of the write next to undo, if there is one. A write
+    /// recorded or undone since moves it.
+    pub(super) fn mark(&self) -> Option<WriteMark> {
+        (!self.undo.is_empty()).then_some(WriteMark {
+            recorded: self.recorded,
+            depth: self.undo.len(),
+        })
     }
 }
 

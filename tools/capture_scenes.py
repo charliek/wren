@@ -22,7 +22,9 @@ menu with no suggestions, and the menu above a word on the last visible row.
 to 19 November 2026, shoots its task lines, the task colours (with a caret,
 a selection, and two days later), the emoji spike's note (with a caret
 and a selection on its glyphs), the line commands, the status bar and, on
-the advanced engine, the task, status, priority and spelling menus, and
+the advanced engine, the task, status, priority and spelling menus, then
+the task view and its ways in (the header counts, a row's task actions,
+the hidden marks and the message with Undo), and
 writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
@@ -398,6 +400,54 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
         calendar_scenes(client, shot_here, resize)
         suggestion_scenes(client, shot_here)
     view_scenes(client, shot_here)
+    entry_scenes(client, shot_here)
+
+
+def entry_scenes(client, shot_here) -> None:
+    """The ways into the task view (discovery/tasks-build.md item 10.2),
+    from the Emoji group, whose tasks are all due later while the rest of
+    the workspace has overdue ones: the header counts (the Notes one not
+    red, the others red) and then hidden; a group's actions with the task
+    rows; the Footer group hidden, with its mark and the message with Undo;
+    and the open note's tasks hidden, with its "tasks off" mark. Each is
+    undone, so the workspace is left as it was."""
+    open_note(client, "Emoji spike.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Emoji"),
+             timeout=10, description="the emoji note opens")
+    client.call("editor.focus")
+    headers = client.call("tasks.entry")["headers"]
+    assert headers["notes"]["overdue"] == 0 and headers["sections"]["overdue"] > 0, headers
+    shot_here("entry-counts")
+    client.call("command.run", {"id": "view.toggle_task_counts"})
+    client.call("tasks.entry", {"dismiss": True})
+    assert client.call("tasks.entry")["counts"] is False
+    shot_here("entry-counts-off")
+    client.call("command.run", {"id": "view.toggle_task_counts"})
+    client.call("tasks.entry", {"dismiss": True})
+    groups = {row["path"]: row["id"] for row in client.call("session.get")["groups"]}
+    client.call("palette.open", {"mode": "item_actions",
+                                 "target": {"group": groups["Tasks/Footer"]}})
+    shot_here("entry-group-actions")
+    rows = client.call("navigation.get")["modal"]["results"]
+    hide = next(index for index, row in enumerate(rows)
+                if row["key"]["item_action"]["command"] == "group.hide_tasks")
+    client.call("palette.activate", {"index": hide})
+    state = client.call("tasks.entry")
+    assert state["marks"]["groups"] == ["Tasks/Footer"] and state["notice"]["undo"], state
+    shot_here("entry-group-hidden")
+    client.call("tasks.entry", {"undo": True})
+    notes = {row["path"]: row["id"] for row in client.call("session.get")["notes"]}
+    emoji = "Tasks/Emoji/Emoji spike.md"
+    client.call("palette.open", {"mode": "item_actions", "target": {"note": notes[emoji]}})
+    rows = client.call("navigation.get")["modal"]["results"]
+    hide = next(index for index, row in enumerate(rows)
+                if row["key"]["item_action"]["command"] == "note.hide_tasks")
+    client.call("palette.activate", {"index": hide})
+    state = client.call("tasks.entry")
+    assert state["marks"]["notes"] == [emoji] and state["notice"]["undo"], state
+    shot_here("entry-note-hidden")
+    client.call("tasks.entry", {"undo": True})
+    assert client.call("tasks.entry")["marks"] == {"groups": [], "notes": []}
 
 
 def view_scenes(client, shot_here) -> None:
@@ -738,7 +788,9 @@ def command_scenes(client, shot_here) -> None:
     client.call("editor.focus")
     client.call("palette.open", {"mode": "commands"})
     rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
-    tasks = [row for row in rows if row["group"] == "Tasks"]
+    # The line commands: Show tasks (item 10.2) is the app's.
+    tasks = [row for row in rows
+             if row["group"] == "Tasks" and row["key"]["command"] != "tasks.show"]
     # The status and priority menus (item 3.4) and the calendar (item 4.1)
     # are the advanced engine's.
     menus = {"task.set_status", "task.set_priority", "task.set_due"}

@@ -121,6 +121,8 @@ pub const MENUS: [Menu; 5] = {
                 C("navigation.search", "Search Workspace…"),
                 // On a board it opens the jump to a node (§5.18 rule 3).
                 C("navigation.outline", "Jump in Note…"),
+                // Built only with tasks on, as the next row of View.
+                C("tasks.show", "Show Tasks"),
                 S,
                 C("navigation.back", "Back"),
                 C("navigation.forward", "Forward"),
@@ -141,6 +143,7 @@ pub const MENUS: [Menu; 5] = {
                 S,
                 C("view.focus", "Toggle Focus Mode"),
                 C("view.collapse_columns", "Toggle Collapsed Columns"),
+                C("view.toggle_task_counts", "Toggle Task Counts"),
             ],
         },
         Menu {
@@ -327,6 +330,101 @@ mod tests {
         for row in [Row::Separator, Row::Native(Native::About)] {
             assert!(row_built(&row, false));
         }
+    }
+
+    /// Show tasks ends the Go menu's jumps and Toggle task counts the View
+    /// menu (item 10.2), App commands built only with tasks on; with tasks
+    /// off both menus are as they were, row for row, with no separator
+    /// left doubled or trailing.
+    #[test]
+    fn the_task_items_are_in_go_and_view_only_with_tasks_on() {
+        let built = |title: &str, tasks: bool| -> Vec<String> {
+            let menu = MENUS.iter().find(|menu| menu.title == title).unwrap();
+            menu.rows
+                .iter()
+                .filter(|row| row_built(row, tasks))
+                .map(|row| match row {
+                    Row::Command(key, _) => (*key).to_owned(),
+                    Row::Separator => "-".to_owned(),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            built("Go", false),
+            [
+                "palette.commands",
+                "navigation.jump",
+                "navigation.search",
+                "navigation.outline",
+                "-",
+                "navigation.back",
+                "navigation.forward",
+                "-",
+                "navigation.column_left",
+                "navigation.column_right",
+            ]
+        );
+        assert_eq!(
+            built("View", false),
+            [
+                "font.increase",
+                "font.decrease",
+                "font.reset",
+                "-",
+                "font.choose",
+                "-",
+                "view.focus",
+                "view.collapse_columns",
+            ]
+        );
+        let go = built("Go", true);
+        assert_eq!(go[3..5], ["navigation.outline", "tasks.show"]);
+        assert_eq!(go.len(), built("Go", false).len() + 1);
+        let view = built("View", true);
+        assert_eq!(
+            view.last().map(String::as_str),
+            Some("view.toggle_task_counts")
+        );
+        assert_eq!(view.len(), built("View", false).len() + 1);
+        for key in ["tasks.show", "view.toggle_task_counts"] {
+            let id = CommandId::parse(key).unwrap();
+            assert!(id.tasks() && id.task_entry(), "{key}");
+            assert_eq!(id.scope(), Scope::App, "{key}");
+        }
+        // Each menu item a task command has is one of these two: the line
+        // commands are the editor's, and the hides act on a row.
+        let tasks: Vec<_> = all_commands()
+            .filter(|(_, key, _)| CommandId::parse(key).unwrap().tasks())
+            .map(|(menu, key, _)| (menu.title, key))
+            .collect();
+        assert_eq!(
+            tasks,
+            [("Go", "tasks.show"), ("View", "view.toggle_task_counts")]
+        );
+        // The Mac menu shows Show tasks' key, ⇧⌘T, once tasks join the
+        // keymap.
+        let scheme = keybind::Scheme::new(Platform::Mac, keybind::LinuxModifier::Ctrl);
+        let (mac, warnings) = Keymap::build(
+            scheme,
+            keybind::default_bindings(scheme)
+                .into_iter()
+                .chain(keybind::default_board_bindings(scheme))
+                .chain(keybind::default_task_bindings(scheme)),
+            &[],
+            |action| {
+                CommandId::parse(action).map(|id| match id.scope() {
+                    Scope::Board => Layer::Board,
+                    Scope::App | Scope::Editor => Layer::Base,
+                })
+            },
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            shown(&mac, "tasks.show", Kind::Plain).as_deref(),
+            Some("shift+super+t")
+        );
+        assert_eq!(shown(&mac, "view.toggle_task_counts", Kind::Plain), None);
     }
 
     #[test]

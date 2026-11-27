@@ -185,6 +185,9 @@ pub struct Settings {
     /// owner: each name without its `@`, case folded as owners compare
     /// ([`wren_markdown::task::fold_name`]), in the order written.
     pub tasks_me: Vec<String>,
+    /// Whether each column's header counts the open and doing tasks of
+    /// what the column belongs to, with `tasks` on.
+    pub task_counts: bool,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
     /// Linux's command key, the `mod` of the keymap. Parsed everywhere and
@@ -214,6 +217,7 @@ impl Default for Settings {
             tasks: true,
             tasks_suggest: true,
             tasks_me: Vec::new(),
+            task_counts: true,
             linux_modifier: LinuxModifier::default(),
             keybinds: Vec::new(),
             warnings: Vec::new(),
@@ -361,6 +365,10 @@ impl Settings {
                 },
                 "tasks-me" => match parse_names(value) {
                     Some(names) => settings.tasks_me = names,
+                    None => invalid(),
+                },
+                "task-counts" => match parse_bool(value) {
+                    Some(enabled) => settings.task_counts = enabled,
                     None => invalid(),
                 },
                 "linux-modifier" => match LinuxModifier::parse(value) {
@@ -640,6 +648,11 @@ pub const TEMPLATE: &str = "\
 # Me in the task views: the owners who count as you, besides tasks with no
 # owner. Names without the @, separated by commas; case does not matter.
 # tasks-me = sam, sam.lee
+
+# Task counts: each column's header counts the open and doing tasks of the
+# workspace, the section or the group it shows, red when one is overdue; a
+# click shows them. It needs tasks = on.
+# task-counts = on
 
 # The command key on Linux: ctrl, as other apps use, or alt, the way Cmd
 # works on macOS (Ctrl then still undoes, copies, pastes, finds and quits).
@@ -970,6 +983,30 @@ mod tests {
         let off = with_value(TEMPLATE, "tasks-suggest", "off");
         assert!(!Settings::parse(&off).tasks_suggest);
         assert!(Settings::parse(&off).tasks == Settings::parse(TEMPLATE).tasks);
+    }
+
+    #[test]
+    fn task_counts_default_on_and_parse_booleans() {
+        assert!(Settings::default().task_counts);
+        assert!(Settings::parse("").task_counts);
+        assert!(Settings::parse(TEMPLATE).task_counts);
+        for (value, enabled) in [("on", true), ("true", true), ("off", false), ("no", false)] {
+            let settings = Settings::parse(&format!("task-counts = {value}\n"));
+            assert_eq!(settings.task_counts, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+            assert!(settings.tasks, "{value}");
+        }
+        let settings = Settings::parse("task-counts = off\ntask-counts = some\n");
+        assert!(!settings.task_counts, "a bad value keeps the earlier one");
+        assert!(settings.warnings[0].contains("line 2: invalid task-counts value"));
+        assert!(TEMPLATE.contains("\n# task-counts = on\n"));
+        // The palette's toggle writes the line after the commented one.
+        let off = with_value(TEMPLATE, "task-counts", "off");
+        assert!(off.contains("\n# task-counts = on\n") && off.ends_with("task-counts = off\n"));
+        assert!(!Settings::parse(&off).task_counts);
+        let on = with_value(&off, "task-counts", "on");
+        assert!(Settings::parse(&on).task_counts);
+        assert_eq!(on.matches("task-counts = on").count(), 2, "{on}");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use iced::widget::{
 };
 use iced::{Border, Element, Fill, Shrink};
 use wren_core::kind::NoteKind;
-use wren_core::model::{GroupId, Note, Parent, SectionId, Workspace};
+use wren_core::model::{GroupId, ItemRef, Note, Parent, SectionId, Workspace};
 use wren_core::ops::Op;
 use wren_core::theme::Rgb;
 
@@ -350,22 +350,28 @@ impl App {
         } else {
             title.width(Fill).into()
         };
+        // With tasks on, the count of what the column belongs to sits
+        // before the +.
+        let count = self.header_count_view(column);
         container(
-            row![
-                title,
-                button(chrome::icon(Icon::Plus, 14.0, colors.muted))
-                    .width(26)
-                    .height(26)
-                    .padding(6)
-                    .on_press_maybe(
-                        self.command_enabled(command)
-                            .then_some(Message::Command(Command::Run(command)))
-                    )
-                    .style(move |_, status| chrome::control(self.definition, status, false, true))
-            ]
-            .spacing(4)
-            .align_y(iced::Center)
-            .clip(true),
+            row![title]
+                .push(count)
+                .push(
+                    button(chrome::icon(Icon::Plus, 14.0, colors.muted))
+                        .width(26)
+                        .height(26)
+                        .padding(6)
+                        .on_press_maybe(
+                            self.command_enabled(command)
+                                .then_some(Message::Command(Command::Run(command))),
+                        )
+                        .style(move |_, status| {
+                            chrome::control(self.definition, status, false, true)
+                        }),
+                )
+                .spacing(4)
+                .align_y(iced::Center)
+                .clip(true),
         )
         .height(46)
         .padding(iced::Padding {
@@ -536,6 +542,7 @@ impl App {
                     &section.name,
                     self.section_count(section.id),
                     self.selected_section == Some(section.id),
+                    None,
                 ));
             }
         }
@@ -565,6 +572,7 @@ impl App {
                     &group.name,
                     group_count(model, group.id),
                     self.selected_group == Some(group.id),
+                    self.row_mark(ItemRef::Group(group.id)),
                 ));
                 count += 1;
             }
@@ -628,7 +636,14 @@ impl App {
                 } else {
                     name
                 };
-                let title = row![name, chrome::label(modified_label(note), 11, colors.muted)]
+                // With tasks on, a note whose front matter hides its tasks
+                // is marked after its name.
+                let title = row![name]
+                    .push(
+                        self.row_mark(ItemRef::Note(note.id))
+                            .map(|mark| self.mark_view(mark)),
+                    )
+                    .push(chrome::label(modified_label(note), 11, colors.muted))
                     .spacing(8)
                     .align_y(iced::Center);
                 let mut label = column![title].spacing(3).clip(true);
@@ -742,6 +757,7 @@ impl App {
         name: &'a str,
         count: usize,
         selected: bool,
+        mark: Option<&'static str>,
     ) -> Element<'a, Message> {
         let colors = self.definition.colors;
         let column = match kind {
@@ -749,13 +765,12 @@ impl App {
             RowKind::Group(_) => Column::Groups,
             RowKind::Note(_) => Column::Notes,
         };
-        let content = row![
-            ellipsis(name, 13.0, theme::color(colors.text)),
-            chrome::label(count.to_string(), 11, colors.muted)
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .clip(true);
+        let content = row![ellipsis(name, 13.0, theme::color(colors.text))]
+            .push(mark.map(|mark| self.mark_view(mark)))
+            .push(chrome::label(count.to_string(), 11, colors.muted))
+            .spacing(8)
+            .align_y(iced::Center)
+            .clip(true);
         container(content)
             .id(registry.row(kind))
             .height(36)
@@ -1081,23 +1096,38 @@ impl App {
         // press on one of its buttons is taken there before the canvas
         // hears it, so a click on the board's zoom or undo leaves the board
         // the keyboard.
-        layers([
-            column![
-                header,
-                raw_banner,
-                find,
-                document,
-                iced::widget::Space::new().height(FOOTER)
+        let pane: Element<'_, Message> = column![
+            header,
+            raw_banner,
+            find,
+            document,
+            iced::widget::Space::new().height(FOOTER)
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into();
+        let footer: Element<'_, Message> = column![iced::widget::Space::new().height(Fill), footer]
+            .width(Fill)
+            .height(Fill)
+            .into();
+        if !self.preferences.tasks {
+            return layers([pane, footer]).into();
+        }
+        // With tasks on, a third layer over both holds the message with
+        // Undo, shown or not, so the pane keeps its shape as it comes and
+        // goes.
+        let notice: Element<'_, Message> = match self.notice_view() {
+            Some(notice) => column![
+                iced::widget::Space::new().height(Fill),
+                notice,
+                iced::widget::Space::new().height(FOOTER + 14.0)
             ]
             .width(Fill)
             .height(Fill)
             .into(),
-            column![iced::widget::Space::new().height(Fill), footer]
-                .width(Fill)
-                .height(Fill)
-                .into(),
-        ])
-        .into()
+            None => iced::widget::Space::new().into(),
+        };
+        layers([pane, footer, notice]).into()
     }
 
     /// The footer under the editor, `width` wide inside its insets.

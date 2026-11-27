@@ -425,6 +425,7 @@ impl App {
             "tasks.get" | "tasks.set_today" | "tasks.calendar" | "tasks.calendar_type"
             | "tasks.calendar_click" | "tasks.owners" | "tasks.form" | "tasks.form_type"
             | "tasks.form_click" | "tasks.view" => return self.tasks_request(request),
+            "tasks.entry" => return self.task_entry_request(request),
             "board.export" => {
                 // What `note.export_svg`, `note.export_png` or
                 // `note.export_drawio` writes once its save dialog closes.

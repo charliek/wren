@@ -64,6 +64,16 @@ TASK_COMMANDS = {
     "task.priority.raise", "task.priority.lower", "task.set_due", "task.clear_due",
     "task.edit",
 }
+# The ways into the task view (tasks-build item 10.2), App commands that
+# exist only with tasks on, each with whether it is enabled with an empty
+# section selected: Show tasks and the counts' toggle anywhere, the hides
+# only with a group or a Markdown note selected.
+TASK_ENTRY_COMMANDS = {
+    "tasks.show": True,
+    "view.toggle_task_counts": True,
+    "group.hide_tasks": False,
+    "note.hide_tasks": False,
+}
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
@@ -282,7 +292,7 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         if os.environ.get("WRENTEST_TASKS"):
             assert tasks is (os.environ["WRENTEST_TASKS"] == "on")
         expected = (COMMANDS | (set(BOARD_COMMANDS) if boards else set())
-                    | (TASK_COMMANDS if tasks else set()))
+                    | (TASK_COMMANDS | set(TASK_ENTRY_COMMANDS) if tasks else set()))
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         unexpected = sorted(set(by_id) - expected)
@@ -297,7 +307,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         assert all(row["title"] for row in rows)
         assert {key: row["state"] for key, row in by_id.items() if row["state"]} == {
             "editor.toggle_markdown_assist": "on", "editor.toggle_engine": "classic",
-            "editor.toggle_spell_check": spell_setting()}
+            "editor.toggle_spell_check": spell_setting(),
+            **({"view.toggle_task_counts": "on"} if tasks else {})}
         # Suggesting needs the advanced engine, and this runs on the classic.
         assert by_id["editor.spell_suggest"]["enabled"] is False
         for key in COMMANDS - {"navigation.back", "navigation.forward", "note.open_conflict",
@@ -309,6 +320,9 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         # task's: only the form, which can make it one, is enabled.
         for key in TASK_COMMANDS if tasks else ():
             assert by_id[key]["enabled"] is (key == "task.edit"), key
+        # A Markdown note in a group is selected: every way in is enabled.
+        for key in TASK_ENTRY_COMMANDS if tasks else ():
+            assert by_id[key]["enabled"] is True, key
         # A Markdown note is open in a group: a new board can be made here,
         # and nothing is exported.
         for key, where in BOARD_COMMANDS.items():
@@ -334,6 +348,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is False, key
         for key in ("group.new", "section.rename"):
             assert by_id[key]["enabled"] is True, key
+        for key, enabled in TASK_ENTRY_COMMANDS.items() if tasks else ():
+            assert by_id[key]["enabled"] is enabled, key
         assert set(by_id) == expected
         # No group is selected: a board can be neither made nor exported.
         for key in BOARD_COMMANDS if boards else ():
@@ -1015,13 +1031,16 @@ def test_normal_onboarding_named_canonical_workspaces_and_last_active_restore_wi
         assert navigation(app)["registrations"] == [] and navigation(app)["active_registration"] is None
         rows = palette(app, "commands")["results"]
         enabled = {row["key"]["command"] for row in rows if row["enabled"]}
+        # The task counts' toggle (item 10.2) is a setting, like the others.
+        tasks = app.client.call("tasks.get")["tasks"]
         assert enabled == {
             "workspace.add", "workspace.switch", "theme.choose",
             "font.choose", "font.increase", "font.decrease", "font.reset",
             "settings.open", "settings.reload", "app.quit",
             "editor.toggle_markdown_assist", "editor.toggle_engine",
             "editor.toggle_spell_check", "settings.open_words",
-        } | ({"keys.toggle_linux_modifier"} if os.uname().sysname != "Darwin" else set())
+        } | ({"keys.toggle_linux_modifier"} if os.uname().sysname != "Darwin" else set()) \
+            | ({"view.toggle_task_counts"} if tasks else set())
         gateway(app, "palette.close")
         command(app, "note.new", disposition="blocked")
         add_workspace(app, alias, "Southern laboratory")

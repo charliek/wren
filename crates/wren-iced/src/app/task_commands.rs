@@ -495,13 +495,20 @@ mod tests {
         let rows = listed(&mut app);
         let tasks: Vec<(CommandId, bool)> = rows
             .iter()
-            .filter(|(_, group, _)| *group == "Tasks")
+            .filter(|(id, group, _)| *group == "Tasks" && !id.task_entry())
             .map(|(id, _, enabled)| (*id, *enabled))
             .collect();
         assert_eq!(
             tasks,
             TASKS_GROUP.map(|id| (id, true)).to_vec(),
             "every line command, enabled on a task line"
+        );
+        // Show tasks (item 10.2) ends the group, the app's own command.
+        assert_eq!(
+            rows.iter()
+                .rfind(|(_, group, _)| *group == "Tasks")
+                .map(|(id, _, enabled)| (*id, *enabled)),
+            Some((CommandId::ShowTasks, true))
         );
         // The group follows Markdown's among the groups a note lists.
         let groups: Vec<&str> = rows.iter().map(|(_, group, _)| *group).collect();
@@ -513,11 +520,13 @@ mod tests {
         app.editor
             .move_cursor(caret(line_of(NOTE, "Plain text."), 0));
         // Off a task line only the form is enabled: it makes the line one.
+        // Show tasks needs no task line.
         let disabled = listed(&mut app);
         assert!(disabled
             .iter()
             .filter(|(_, group, _)| *group == "Tasks")
-            .all(|(id, _, enabled)| *enabled == (*id == CommandId::TaskEdit)));
+            .all(|(id, _, enabled)| *enabled
+                == matches!(*id, CommandId::TaskEdit | CommandId::ShowTasks)));
 
         let (_directory, mut app) = note_app("advanced", "off", NOTE);
         app.editor
@@ -543,7 +552,11 @@ mod tests {
     /// themselves, no default key, and out of the macOS menu table.
     #[test]
     fn the_task_commands_keep_the_command_tables_rules() {
-        let rows: Vec<_> = definitions().filter(|row| row.id.tasks()).collect();
+        // The entry points (item 10.2) are App commands of their own,
+        // checked in `task_entry.rs`; these rules are the line commands'.
+        let rows: Vec<_> = definitions()
+            .filter(|row| row.id.tasks() && !row.id.task_entry())
+            .collect();
         assert_eq!(
             rows.iter().map(|row| row.id).collect::<Vec<_>>(),
             TASKS_GROUP
@@ -577,6 +590,13 @@ mod tests {
                 assert!(
                     !action.starts_with("task.") || matches!(action, "task.set_due" | "task.edit"),
                     "{scheme:?}: {trigger} → {action} (Q13: palette only)"
+                );
+                // Of the entry points only Show tasks has a key (§10,
+                // 2026-11-26).
+                let id = CommandId::parse(action).expect("a default names a command");
+                assert!(
+                    !id.task_entry() || id == CommandId::ShowTasks,
+                    "{scheme:?}: {trigger} → {action}"
                 );
             }
         }

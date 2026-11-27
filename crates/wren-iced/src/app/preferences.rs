@@ -828,6 +828,18 @@ impl App {
         self.save_toggle("spell-check", if enabled { "on" } else { "off" })
     }
 
+    /// Show or hide the columns' task counts, and save the choice
+    /// (`task-counts`). The message after it offers to flip it back.
+    pub(super) fn toggle_task_counts(&mut self) -> Gateway {
+        let shown = !self.preferences.settings.task_counts;
+        self.preferences.settings.task_counts = shown;
+        let outcome = self.save_toggle("task-counts", if shown { "on" } else { "off" });
+        if outcome.processed.disposition.committed() {
+            self.notify(super::notice::Notice::counts(shown));
+        }
+        outcome
+    }
+
     /// Move the editor to the other engine, keeping its text and cursor
     /// (undo history is dropped), and save the choice.
     pub(super) fn toggle_editor_engine(&mut self) -> Gateway {
@@ -877,6 +889,7 @@ impl App {
             }),
             CommandId::SwitchEngine => Some(settings.editor_engine.value()),
             CommandId::ToggleSpellCheck => Some(if settings.spell_check { "on" } else { "off" }),
+            CommandId::ToggleTaskCounts => Some(if settings.task_counts { "on" } else { "off" }),
             _ => None,
         }
     }
@@ -884,7 +897,7 @@ impl App {
     /// Write one setting to `config.conf`, then re-read the merged file so
     /// edits made outside Wren since the last reload apply now rather than
     /// being marked as seen. Returns the warning to report, if any.
-    fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
+    pub(super) fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
         let path = self.preferences.path.clone()?;
         match settings::write_value(&path, key, value) {
             Ok(()) => self.reload_settings(true),

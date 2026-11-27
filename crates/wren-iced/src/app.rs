@@ -29,10 +29,12 @@ pub(crate) mod commands;
 mod gestures;
 mod host_menu;
 mod navigation;
+mod notice;
 mod palette;
 mod preferences;
 mod spelling;
 mod task_commands;
+mod task_entry;
 mod task_footer;
 mod task_form;
 mod task_list;
@@ -105,6 +107,11 @@ pub struct App {
     /// The list of the task view in the pane: what it shows, its
     /// selection, its keyboard and its menu; see `task_list_view`.
     task_list: task_list_view::ListState,
+    /// The message with Undo at the foot of the pane, while it shows; see
+    /// `notice`. Never with tasks off.
+    notice: Option<notice::Shown>,
+    /// How many messages have shown, which numbers the next.
+    notice_serial: u64,
     /// Each time the keyboard was given to a column: the surface the pane
     /// showed when it was the pane's, `None` for a browser column.
     #[cfg(test)]
@@ -250,6 +257,8 @@ pub enum Message {
     TaskForm(task_form::Event),
     /// Input from the task view in the pane.
     TaskView(tasks_view::Event),
+    /// Input from the message with Undo.
+    Notice(notice::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -454,6 +463,8 @@ impl App {
             task_views: tasks_view::Trail::default(),
             task_writes: task_target::Writes::default(),
             task_list: task_list_view::ListState::default(),
+            notice: None,
+            notice_serial: 0,
             #[cfg(test)]
             focus_given: Default::default(),
             editor: EditorView::with_backend(engine, &contents),
@@ -697,6 +708,7 @@ impl App {
             Message::Calendar(event) => return self.calendar_event(event),
             Message::TaskForm(event) => return self.task_form_event(event),
             Message::TaskView(event) => return self.task_view_event(event),
+            Message::Notice(event) => return self.notice_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -775,6 +787,7 @@ impl App {
                 if self.timer_held {
                     return Task::none();
                 }
+                self.expire_notice(Instant::now());
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);
