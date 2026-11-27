@@ -333,14 +333,14 @@ note, or the empty pane.
 | Key | Does |
 |---|---|
 | ↑ ↓ or `k` `j` | the previous or next row; PgUp, PgDn, Home and End go further |
-| ↵ | opens the note at the row's line |
+| ↵ | opens the note at the row's line; if the task is no longer there, the note opens and a message says so |
 | Space, ⌘↵ / Mod+Enter | toggles the task done or open. The second is the key of `markdown.toggle_task`, so it follows a rebinding and the Mod switch |
 | `s`, `p`, `d` | the status menu, the priority menu, the calendar |
 | `+` `=`, `-` `_` | raises or lowers the priority one level |
 | `e` | the [task form](#the-task-form) for the row |
 | F2 | renames the row's description in a one-line field; ↵ writes it, Esc cancels. This is the view's own key, whatever the keymap gives F2 elsewhere |
 | `r` | refreshes: rows written move to where they now belong |
-| ⌘Z / Mod+Z | undoes the last task write; this is `edit.undo`'s key, so it follows a rebinding |
+| ⌘Z / Mod+Z | undoes the last task write and says what it undid; this is `edit.undo`'s key, so it follows a rebinding |
 | Tab, ⇧Tab | the next or previous control (the scope chip, the status chips, the pickers and Hide done), and the list between them |
 | ← → | between the controls, while one has the keyboard |
 | ↵, Space | on a control, presses a chip or Hide done, or opens a picker's menu; ↓ opens a picker's menu |
@@ -350,7 +350,9 @@ The row menus take the keys of [Task menus](#task-menus), and the row's task
 menu adds `o` Open the note and `h` Hide tasks in the note. The filter menus
 have their own keys, shown beside their rows; the scope menu takes `w` Workspace, `s` Section, `g` Group and `n` Note. A key
 that opens a menu, the calendar or the form is the last input of its batch,
-so keys typed in the same instant are dropped. While the description field
+so keys typed in the same instant are dropped, as are those after an app
+shortcut that takes the keyboard (the palette, a dialog) or a refused write.
+Held keys do not repeat, except the arrows. While the description field
 is open, the view's toggle and undo keys do nothing.
 
 **Toggle task counts** (`view.toggle_task_counts`) has no default key. It

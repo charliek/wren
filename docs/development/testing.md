@@ -540,8 +540,9 @@ for r in tiny-skia wgpu; do for t in dark light; do
 done; done
 ```
 
-`--window 1024x640` (X11 only) resizes the window before the board scenes,
-to see them at the size of a smaller screen; give it a `--label` too.
+`--window 1024x640` (X11 only) resizes the window before the board scenes
+or the `--only task-list` scenes, to see them at the size of a smaller
+screen; give it a `--label` too.
 
 To try boards by hand without touching your own settings, copy the sample
 workspace and give Wren a throwaway config directory, in a target directory

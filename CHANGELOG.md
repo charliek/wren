@@ -45,6 +45,8 @@ version's section as its notes, and publishes to the apt repo. See
   dropped and rescanned, the open note found deleted is removed, and a failed
   open reads the note again. A note recreated just after a failed open can
   show no content in search until the next poll, about a second.
+- A write to a closed note that finds bytes that are not text now refuses, and
+  drops the note's old tasks and search text until it reads again.
 
 ## v0.2.2 — 2026-11-26
 

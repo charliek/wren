@@ -394,14 +394,18 @@ warning mark when it is not a real day), and under the description its
 source: the nearest heading when the list is grouped by note (or "Top of
 note"), and otherwise the group, the note and the heading. Done and
 cancelled rows are struck through and dimmed, their owners in the dimmed
-colour, and the date cell shows the done or cancelled date they carry. An empty list says what to
-change to see tasks again.
+colour, and the date cell shows the done or cancelled date they carry. A box
+whose character has no status (`[?]`, `[>]`) shows that symbol in the row.
+In a narrow window a long description ends in "…". An empty list says what to
+change to see tasks again; when Hide done after 14 days alone hides every
+task, it says to turn that off.
 
 The footer counts the open and doing tasks and the overdue ones of the
 scope, and then says what is left out: **Left out: 1 note (2 tasks, tasks:
 off), 3 notes in hidden folders (9 tasks)**, and unreadable notes. At the
 right it shows the keys: "Space toggle · S D P · E edit · F2 rename · ↵
-open · R refresh".
+open · R refresh". When the window is narrow the hint drops whole pieces from
+its end; the counts always stay.
 
 ### Keys in the view
 
@@ -412,7 +416,7 @@ controls; ↵ or Space presses a control and ↓ opens a menu control's menu.
 | Key | Does |
 |---|---|
 | ↑ ↓ or `k` `j` | Select the previous or next row. PgUp, PgDn, Home and End move further. |
-| ↵ | Open the note at the row's line. |
+| ↵ | Open the note at the row's line (found by the rule under [Writing to notes](#writing-to-notes)). If the task is not there, the note opens and a message says "This task changed since the list was built; the note is open". Back returns to the view, also when that note was already under it. |
 | Space, ⌘↵ / Mod+Enter | Toggle the task done, or back to open, as in the editor. ⌘↵ is the key of **Toggle a task**, so it follows a rebinding. |
 | `s` | Status menu. |
 | `d` | The calendar, to set or clear the due date. |
@@ -429,11 +433,15 @@ are remembered, and it does not leave the view (Back does). In a filter's
 menu it closes the menu, and from a control it gives the keyboard back to
 the list. A key that opens a menu, the calendar or the form is the last
 input of its batch, so keys typed in the same instant are dropped, not
-applied to the row.
+applied to the row. So is an app shortcut that takes the keyboard (the
+palette, a dialog); other app shortcuts run at their place in the batch. A
+refused write ("This task changed; the list was refreshed") drops the rest of
+its batch too. A held key does not repeat: Space, the toggle key, ↵, `s`,
+`p`, `d`, `e` and F2 act once, while the arrows repeat.
 
 With the mouse: a click on a box cycles the status (open, doing, done, open;
-a cancelled task reopens, and a box whose character has no status is only
-selected), a click on the priority opens the priority menu, a click on the
+a cancelled task reopens, and a box whose character has no status, such as
+`[?]`, is only selected), a click on the priority opens the priority menu, a click on the
 due date opens the calendar, and a click on the source line opens the note
 at the task. A right-click on a row opens its **task menu**: the editor's
 task menu, plus **Open the note at this line** and **Hide tasks in** the
@@ -482,7 +490,10 @@ example "Done · wrote line 12 of Work/Planning/Roadmap.md", with **Undo**.
 It stays six seconds and the next message replaces it. A refusal is said in
 the message, with no Undo. Undo, from the message or from ⌘Z / Mod+Z, puts
 the line back through the same path and with the same check: if the task
-has changed since, it is refused and forgotten. Undo is Wren's own stack of
+has changed since, it is refused and forgotten. Every undo of a task write
+says what it undid and where ("Undone: Done · wrote line 3 of
+Work/Tasks/B.md"), and a refused one says "Nothing undone:" and why; undoing a
+group exclusion or the counts toggle shows no message. Undo is Wren's own stack of
 task-line and note front-matter writes, a hundred deep, and holds until you
 leave the workspace. In the open note it is one more step of
 the editor's history, not a step back in it.
