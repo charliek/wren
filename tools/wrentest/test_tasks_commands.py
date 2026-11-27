@@ -119,12 +119,13 @@ def undo_to_original(app: WrenApp, path: Path) -> None:
 
 
 def tasks_rows(app: WrenApp, query: str = "") -> list[tuple[str, bool]]:
-    """The palette's Tasks group: each row's command and whether it runs."""
+    """The palette's Tasks group's line commands: each row's command and
+    whether it runs. Show tasks (item 10.2), the app's, is left out."""
     app.client.call("palette.open", {"mode": "commands"})
     modal = app.client.call("palette.query", {"query": query})["navigation"]["modal"]
     app.client.call("palette.close")
     return [(row["key"]["command"], row["enabled"]) for row in modal["results"]
-            if row["group"] == "Tasks"]
+            if row["group"] == "Tasks" and row["key"]["command"] != "tasks.show"]
 
 
 # (line's start, command, the line after it)

@@ -197,8 +197,8 @@ impl App {
 
     fn wanted_proofreader(&self) -> Option<Arc<dyn Proofreader>> {
         let wanted = self.preferences.settings.spell_check
-            && self.surface() == Surface::Text
-            && self.ensure_editor_ready().is_ok();
+            && self.document_surface() == Surface::Text
+            && self.editor_holds_note().is_ok();
         wanted
             .then(|| self.spelling.proofreader().cloned())
             .flatten()

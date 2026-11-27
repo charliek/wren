@@ -322,13 +322,30 @@ impl StoreReader {
     }
 }
 
+/// A test's stand-in for another program writing to the workspace: run
+/// once, inside the next [`FsStore::write`], after it has compared the
+/// file with what its caller expects and before it publishes.
+struct Race(Box<dyn FnOnce() + Send>);
+
+impl fmt::Debug for Race {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Race")
+    }
+}
+
 #[derive(Debug)]
 pub struct FsStore {
     reader: StoreReader,
     // This descriptor, and the persistent name, must survive for the entire lock.
     lock: File,
     fault: Option<Fault>,
+    /// How many more times `fault` fails, after this one.
+    fault_again: u32,
+    race: Option<Race>,
     pending_directories: Vec<PendingDirectory>,
+    /// Directories left unsynced by a best-effort write ([`FsStore::best_effort`]):
+    /// retried with the rest, but never a reason to refuse a transition.
+    best_effort_directories: Vec<PendingDirectory>,
     // Losing an unsynced descriptor means later retries cannot prove durability.
     durability_tracking_error: Option<String>,
     warnings: Vec<String>,
@@ -386,7 +403,10 @@ impl FsStore {
             reader,
             lock,
             fault: None,
+            fault_again: 0,
+            race: None,
             pending_directories: Vec::new(),
+            best_effort_directories: Vec::new(),
             durability_tracking_error: None,
             warnings: Vec::new(),
         };
@@ -404,6 +424,48 @@ impl FsStore {
 
     pub fn fail_next(&mut self, fault: Fault) {
         self.fault = Some(fault);
+        self.fault_again = 0;
+    }
+
+    /// For tests, as [`FsStore::fail_next`] is, but for the next `times`
+    /// times `fault` is reached.
+    #[doc(hidden)]
+    pub fn fail_times(&mut self, fault: Fault, times: u32) {
+        self.fault = (times > 0).then_some(fault);
+        self.fault_again = times.saturating_sub(1);
+    }
+
+    /// Run `writes`, whose durability is best effort: a directory they
+    /// leave unsynced is retried by [`FsStore::retry_durability`] as any
+    /// other, but its failing again is no error of the retry, so it never
+    /// blocks what waits on durability. A directory already pending for
+    /// another write stays that write's.
+    pub fn best_effort<T>(&mut self, writes: impl FnOnce(&mut Self) -> T) -> T {
+        let before = self.pending_directories.len();
+        let result = writes(self);
+        let added = self.pending_directories.split_off(before);
+        for directory in added {
+            let known = self.best_effort_directories.iter().any(|pending| {
+                pending.device == directory.device && pending.inode == directory.inode
+            });
+            if !known {
+                self.best_effort_directories.push(directory);
+            }
+        }
+        result
+    }
+
+    /// Whether a best-effort write's directory is still unsynced.
+    pub fn pending_best_effort(&self) -> bool {
+        !self.best_effort_directories.is_empty()
+    }
+
+    /// For tests, as [`FsStore::fail_next`] is: `writer` runs inside the
+    /// next [`FsStore::write`], between its first comparison and its
+    /// publication, as a program that does not take Wren's lock may.
+    #[doc(hidden)]
+    pub fn race_next(&mut self, writer: impl FnOnce() + Send + 'static) {
+        self.race = Some(Race(Box::new(writer)));
     }
 
     pub fn pending_durability(&self) -> bool {
@@ -420,6 +482,11 @@ impl FsStore {
             if let Err(error) = self.sync_directory(&directory.file) {
                 failure.get_or_insert(error);
                 self.pending_directories.push(directory);
+            }
+        }
+        for directory in std::mem::take(&mut self.best_effort_directories) {
+            if self.sync_directory(&directory.file).is_err() {
+                self.best_effort_directories.push(directory);
             }
         }
         failure.map_or(Ok(()), Err)
@@ -477,6 +544,9 @@ impl FsStore {
         let mode = baseline.as_ref().map(|value| value.file.mode);
         let (mut temporary, file) = self.prepare_file(&directory, bytes, mode)?;
         self.inject(Fault::BeforePublish)?;
+        if let Some(Race(writer)) = self.race.take() {
+            writer();
+        }
         self.check_directory(parent.as_ref(), &directory)?;
         match &baseline {
             Some(baseline) => {
@@ -778,7 +848,11 @@ impl FsStore {
 
     fn inject(&mut self, fault: Fault) -> Result<(), StoreError> {
         if self.fault == Some(fault) {
-            self.fault = None;
+            if self.fault_again == 0 {
+                self.fault = None;
+            } else {
+                self.fault_again -= 1;
+            }
             Err(StoreError::Injected(fault))
         } else {
             Ok(())

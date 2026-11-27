@@ -42,7 +42,10 @@ fn delimiter(line: &str) -> bool {
 pub struct Checkpoints {
     boxes: Boxes,
     front_matter_end: Option<usize>,
+    /// Whether the lines read are kept; see [`Checkpoints::states`].
+    texts: bool,
     /// The lines read, one after another, and where each ends in `text`.
+    /// Without their text, every line ends at 0.
     text: String,
     ends: Vec<usize>,
     /// The scanner before some of the lines that are multiples of
@@ -62,12 +65,26 @@ impl Checkpoints {
         Self {
             boxes,
             front_matter_end: None,
+            texts: true,
             text: String::new(),
             ends: Vec::new(),
             saved: vec![(0, Scanner::with_front_matter(None, boxes))],
             saved_bytes: 0,
             state_bytes: STATE_BYTES,
             scanned: 0,
+        }
+    }
+
+    /// As [`Checkpoints::new`], but keeping none of the document's text:
+    /// only how many lines were read and the scanner states. For a host
+    /// that must hold no copy of the text and knows its first changed
+    /// line, which it tells [`update_from`](Self::update_from);
+    /// [`update`](Self::update) has no lines to compare, and forgets
+    /// everything.
+    pub fn states(boxes: Boxes) -> Self {
+        Self {
+            texts: false,
+            ..Self::new(boxes)
         }
     }
 
@@ -93,6 +110,9 @@ impl Checkpoints {
     /// was read still hold. Call it whenever `lines` may have changed
     /// since the last read.
     pub fn update<L: Lines + ?Sized>(&mut self, lines: &L) -> usize {
+        if !self.texts {
+            return self.update_from(lines, 0);
+        }
         let front = block::front_matter_end(lines);
         if front != self.front_matter_end {
             self.restart(front);
@@ -199,7 +219,9 @@ impl Checkpoints {
             }
             let text = lines.line(i);
             if i == self.ends.len() {
-                self.text.push_str(text);
+                if self.texts {
+                    self.text.push_str(text);
+                }
                 self.ends.push(self.text.len());
             }
             let info = scanner.next_line(text);
@@ -367,6 +389,53 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Keeping states alone and told the first changed line, it reads
+    /// what a fresh read reads, and holds none of the document's text.
+    #[test]
+    fn states_alone_read_from_the_line_named_and_keep_no_text() {
+        let read = |kept: &mut Checkpoints, text: &str, first: usize| {
+            let doc = Document::new(text);
+            kept.update_from(&doc, first);
+            let found: Vec<_> = (0..doc.line_count())
+                .map(|l| {
+                    kept.line(&doc, l, |_, info, scanner| opened_task(info, scanner))
+                        .flatten()
+                })
+                .collect();
+            assert!(kept.text.is_empty());
+            assert_eq!(kept.ends.len(), doc.line_count());
+            found
+        };
+        for text in notes() {
+            let mut kept = Checkpoints::states(Boxes::Status);
+            assert_eq!(read(&mut kept, &text, 0), expected(&text, Boxes::Status));
+            let lines: Vec<&str> = text.split('\n').collect();
+            let n = lines.len();
+            for at in [0, 1.min(n - 1), n / 2, n - 1] {
+                for change in ["```", "---", "- [ ] new", "", "  - [x] deep", "> "] {
+                    let mut edited: Vec<&str> = lines.clone();
+                    edited[at] = change;
+                    let edited = edited.join("\n");
+                    assert_eq!(
+                        read(&mut kept, &edited, at),
+                        expected(&edited, Boxes::Status),
+                        "{at} {change:?}"
+                    );
+                    let longer = format!("{edited}\n{change}\n- [ ] tail");
+                    assert_eq!(
+                        read(&mut kept, &longer, n),
+                        expected(&longer, Boxes::Status)
+                    );
+                    assert_eq!(read(&mut kept, &text, at), expected(&text, Boxes::Status));
+                }
+            }
+            // With no line to compare, `update` forgets every state.
+            let doc = Document::new(&text);
+            assert_eq!(kept.update(&doc), 0);
+            assert!(kept.ends.is_empty());
         }
     }
 

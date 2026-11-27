@@ -27,16 +27,25 @@ mod workspace_view;
 
 pub(crate) mod commands;
 mod gestures;
+mod host_menu;
 mod navigation;
+mod notice;
 mod palette;
 mod preferences;
 mod spelling;
 mod task_commands;
+mod task_describe;
+mod task_entry;
 mod task_footer;
 mod task_form;
+mod task_list;
+mod task_list_view;
 mod task_menus;
+mod task_rows;
 mod task_suggest;
+mod task_target;
 mod tasks;
+mod tasks_view;
 mod workspaces;
 
 use crate::panes::Widths;
@@ -87,6 +96,24 @@ pub struct App {
     owners: wren_core::owners::Owners,
     /// The footers' measured label widths; see `task_footer::Widths`.
     label_widths: task_footer::Widths,
+    /// The task views in Back and Forward history, and the one in the
+    /// pane; see `tasks_view::Trail`. Empty with tasks off.
+    task_views: tasks_view::Trail,
+    /// The task writes made from outside the editor that can be undone;
+    /// see `task_target`.
+    task_writes: task_target::Writes,
+    /// The list of the task view in the pane: what it shows, its
+    /// selection, its keyboard and its menu; see `task_list_view`.
+    task_list: task_list_view::ListState,
+    /// The message with Undo at the foot of the pane, while it shows; see
+    /// `notice`. Never with tasks off.
+    notice: Option<notice::Shown>,
+    /// How many messages have shown, which numbers the next.
+    notice_serial: u64,
+    /// Each time the keyboard was given to a column: the surface the pane
+    /// showed when it was the pane's, `None` for a browser column.
+    #[cfg(test)]
+    focus_given: std::cell::RefCell<Vec<Option<board::Surface>>>,
     editor: EditorView,
     /// The open note as a board, when it is one and its text parses; see
     /// `board::Surface`. The editor is empty meanwhile.
@@ -226,6 +253,10 @@ pub enum Message {
     Calendar(calendar::Event),
     /// Input from the task form.
     TaskForm(task_form::Event),
+    /// Input from the task view in the pane.
+    TaskView(tasks_view::Event),
+    /// Input from the message with Undo.
+    Notice(notice::Event),
     /// The board's tool dock opens one of its menus, or closes it.
     DockMenu(Option<board_dock::Menu>),
     /// The board's style bar opens one of its menus, or closes it.
@@ -427,6 +458,13 @@ impl App {
             suggest_installed: false,
             owners: wren_core::owners::Owners::default(),
             label_widths: task_footer::Widths::default(),
+            task_views: tasks_view::Trail::default(),
+            task_writes: task_target::Writes::default(),
+            task_list: task_list_view::ListState::default(),
+            notice: None,
+            notice_serial: 0,
+            #[cfg(test)]
+            focus_given: Default::default(),
             editor: EditorView::with_backend(engine, &contents),
             board: None,
             board_error: None,
@@ -561,9 +599,10 @@ impl App {
         let (calendar, form) = if self.preferences.tasks {
             let calendar = self.sync_calendar();
             let form = self.sync_task_form();
+            let list = self.sync_task_list();
             self.sync_due_target();
             self.sync_suggestions();
-            (calendar, form)
+            (calendar, Task::batch([form, list]))
         } else {
             (Task::none(), Task::none())
         };
@@ -666,6 +705,8 @@ impl App {
             Message::Command(command) => return self.dispatch(command).task,
             Message::Calendar(event) => return self.calendar_event(event),
             Message::TaskForm(event) => return self.task_form_event(event),
+            Message::TaskView(event) => return self.task_view_event(event),
+            Message::Notice(event) => return self.notice_event(event),
             // Opening a menu of a bar finishes an open label first, as a
             // click on one of its controls does: the keys typed next are
             // not the label's, and a style menu's rows preview on the
@@ -744,6 +785,11 @@ impl App {
                 if self.timer_held {
                     return Task::none();
                 }
+                // A message exists only with tasks on: with them off no
+                // clock is read for one.
+                if self.notice.is_some() {
+                    self.expire_notice(Instant::now());
+                }
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);
@@ -766,7 +812,7 @@ impl App {
             Message::ConfirmTrash => return self.submit_dialog(true),
             Message::CancelDialog => {
                 self.dialog = None;
-                return focus_editor();
+                return self.pane_focus();
             }
             Message::DismissBanner => {
                 self.conflict_copy = None;
@@ -793,7 +839,7 @@ impl App {
             }
             Message::FindClose => {
                 self.find_open = false;
-                return focus_editor();
+                return self.pane_focus();
             }
             Message::Escape => {
                 // The calendar and the task form are above everything else
@@ -803,6 +849,15 @@ impl App {
                 }
                 if self.task_form.is_some() {
                     return self.escape_task_form();
+                }
+                // Then a row's description edited in place, the menu over
+                // the task view, and a control of the view's, each of which
+                // gives the keyboard back to its list.
+                if self.cancel_describe() {
+                    return self.task_view_focus();
+                }
+                if self.close_task_menu() || self.unfocus_task_control() {
+                    return Task::none();
                 }
                 // An open suggestions menu, or any popover of the editor's,
                 // is the topmost thing Escape closes; the editor keeps the
@@ -816,7 +871,9 @@ impl App {
                 }
                 self.cancel_gestures();
                 // Esc closes the topmost overlay and keeps the active column;
-                // with none open, it returns the keyboard to the editor.
+                // with none open, it returns the keyboard to the editor, or
+                // to the task view in its place, where it does nothing more
+                // (discovery/tasks-build.md §10, the Escape rule).
                 if self.palette.take().is_some() || self.dialog.take().is_some() {
                     return self.column_focus();
                 }
@@ -911,6 +968,31 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Whether the app's copy of a plain Escape (no Ctrl, Alt or logo key)
+    /// was a press a widget already took, so the app does nothing more.
+    ///
+    /// The one Escape contract: every plain Escape a widget consumes gives
+    /// exactly one credit, to the calendar's, the form's or the editor's
+    /// ledger, and the app's copy of each plain Escape, which iced delivers
+    /// after the widgets' messages of its batch, takes exactly one credit,
+    /// here, before any other routing. A layer that opens later in that
+    /// batch (the form after Escape on an editor menu) must not see the
+    /// copy, and a credit left over would swallow a later Escape.
+    pub(super) fn take_escape_claim(&mut self) -> bool {
+        for ledger in [&mut self.calendar_escapes, &mut self.form_escapes] {
+            if *ledger > 0 {
+                *ledger -= 1;
+                return true;
+            }
+        }
+        // An Escape the task view read in its place, or dropped with the
+        // rest of a batch.
+        if self.take_task_list_copy(&task_list_view::AppCopy::Escape) {
+            return true;
+        }
+        self.editor.take_claimed_escape()
     }
 
     /// A key in the batch of the handover to the calendar or the form,
@@ -1059,9 +1141,14 @@ impl App {
     /// What follows every change to the editor's text: the session draft,
     /// which autosave saves, the edit revision, and a word recount on a
     /// later tick.
+    ///
+    /// Under a task view the editor still holds the open note's text, and
+    /// takes no input: [`App::edit`] refuses every message of its own. An
+    /// edit the app itself applies to it there (a task changed from the
+    /// view) is the note's draft like any other, and calls this.
     fn text_changed(&mut self, started: Instant) {
         // The editor behind a board is not its writer, whatever changed it.
-        if self.surface() == board::Surface::Board {
+        if self.document_surface() == board::Surface::Board {
             return;
         }
         if let Some(note) = self.selected_note {

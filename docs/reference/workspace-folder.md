@@ -82,6 +82,47 @@ stale `[navigation]` table is dropped at the next save. A workspace left
 on a board reopens on it through `selection` or `last_open`; with
 `boards = off` it reopens on the Markdown note an older Wren would.
 
+## `.wren/tasks.toml`
+
+Wren's own file for [tasks](tasks.md), beside `workspace.toml` and kept
+inside the workspace so it travels with it. It is created only once
+something is set. With `tasks = off` Wren neither reads nor writes it, even
+if the file exists.
+
+| Key | Meaning |
+|---|---|
+| `schema_version` | Format version, currently `1`. |
+| `exclude` | Sections and groups, as workspace-relative paths, whose tasks are left out of every summary and count (**Hide tasks from this group**). |
+| `[views."<path>"]` | The summary view's remembered filters for one scope, keyed by the section's, group's or note's path, or `"."` for the workspace. |
+
+A view's table holds only the keys that differ from the default, so a view
+left as it opens has no table:
+
+| Key | Values | Default |
+|---|---|---|
+| `statuses` | a list of `open`, `doing`, `done`, `cancelled` | none (every status) |
+| `owner` | `me`, or `@name` | anyone |
+| `group` | `due`, `priority`, `owner` | `note` |
+| `hide_old` | `false` | `true` |
+| `due` | `overdue`, `earlier`, `today`, `week`, `next`, `later`, `none` | any date |
+| `priority` | `highest`, `high`, `medium`, `low`, `lowest`, `none` | any priority |
+
+```toml
+schema_version = 1
+exclude = ["Reference/Templates"]
+
+[views."Work/Planning"]
+statuses = ["open", "doing"]
+group = "due"
+```
+
+Renaming or moving a section, group or note inside Wren carries its entries
+along, and deleting one inside Wren removes them. Unknown keys survive Wren's saves, but comments and
+formatting are not kept. A file that is not valid TOML, not UTF-8 or of
+another `schema_version` is never overwritten: Wren warns, uses the
+defaults, and leaves the file as it is. A note's own switch,
+`tasks: off` in its front matter, lives in the note, not here.
+
 ## App configuration
 
 Two files live in the platform config directory, and neither is inside a
@@ -89,5 +130,5 @@ workspace:
 
 | File | Owner | Contents |
 |---|---|---|
-| `config.conf` | You | Theme, editor font, keybindings, and the `boards` setting. See [Configuration](configuration.md). |
+| `config.conf` | You | Theme, editor font, keybindings, and the `boards` and `tasks` settings. See [Configuration](configuration.md). |
 | `config.toml` | Wren | Registered workspaces and the last active one. |

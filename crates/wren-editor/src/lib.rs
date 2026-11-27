@@ -253,6 +253,14 @@ impl Viewport {
     pub fn cursor(&self) -> Cursor {
         self.cursor
     }
+
+    /// This view with `cursor` for its cursor and selection: where to come
+    /// back to after an edit a host made while its user looked elsewhere,
+    /// which moved them with the text and should leave the view in place.
+    #[must_use]
+    pub fn with_cursor(self, cursor: Cursor) -> Self {
+        Self { cursor, ..self }
+    }
 }
 
 /// A self-contained Markdown editor backed by a fork of iced's text editor
@@ -588,6 +596,11 @@ impl EditorView {
     /// Returns `Element<'_, Message>` so the parent can map it to its own
     /// message type.
     pub fn view(&self, style: Style, palette: Palette, measure: Measure) -> Element<'_, Message> {
+        self.widget(style, palette, measure).into()
+    }
+
+    /// The widget [`EditorView::view`] shows.
+    fn widget(&self, style: Style, palette: Palette, measure: Measure) -> TextEditor<'_> {
         let editor = TextEditor::new(
             &self.content,
             "note-editor",
@@ -612,7 +625,51 @@ impl EditorView {
         };
         #[cfg(any(test, feature = "test-support"))]
         let editor = editor.spell_frame(&self.spell_frame);
-        editor.into()
+        editor
+    }
+
+    /// What the widget [`EditorView::view`] shows, with the keyboard and
+    /// laid out `width` wide, publishes for `inputs` as one batch of
+    /// events, in order, none of it applied: as iced hands a frame's
+    /// events to one view, so what the widget knows of the batch (a
+    /// handover of the keyboard, a popover closed or opened in it) is as
+    /// in a window. A right-click names its character as
+    /// [`EditorView::right_click_message`] does; one whose place is not
+    /// laid out is left out.
+    #[cfg(feature = "test-support")]
+    pub fn batch_messages(
+        &self,
+        inputs: &[BatchInput],
+        width: f32,
+        style: Style,
+        palette: Palette,
+    ) -> Vec<Message> {
+        use iced::keyboard::{self, key::NativeCode, key::Physical, Location};
+        let events = inputs
+            .iter()
+            .filter_map(|input| match input {
+                BatchInput::Key(key, modifiers) => {
+                    let press = key_press(key.clone(), *modifiers);
+                    let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: press.key,
+                        modified_key: press.modified_key,
+                        physical_key: Physical::Unidentified(NativeCode::Unidentified),
+                        location: Location::Standard,
+                        modifiers: press.modifiers,
+                        text: press.text,
+                        repeat: false,
+                    });
+                    Some((event, None))
+                }
+                BatchInput::RightClick { line, column } => {
+                    let at = self.middle_of(*line, *column)?;
+                    let press = iced::mouse::Event::ButtonPressed(iced::mouse::Button::Right);
+                    Some((iced::Event::Mouse(press), Some(at)))
+                }
+            })
+            .collect();
+        let mut editor = self.widget(style, palette, Measure::default());
+        widget::batch_of(&mut editor, iced::Size::new(width, 2000.0), events)
     }
 
     /// What the widget's highlighter is set up with, for `palette`.
@@ -735,6 +792,20 @@ impl EditorView {
     /// Returns whether the text changed. A plan with an edit off the text,
     /// inside a character, backwards, or overlapping another changes nothing.
     pub fn apply(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        self.apply_edits(edits, selection, false)
+    }
+
+    /// [`apply`](Self::apply), with each edit's text put in as it is:
+    /// its line breaks keep the endings they are written with, instead
+    /// of taking the ending of the line they split. For a host that puts
+    /// back text it took out, endings and all (a CRLF block above an LF
+    /// body), and that has made sure the breaks do not run into the text
+    /// around them.
+    pub fn apply_exact(&mut self, edits: &[Replace], selection: Cursor) -> bool {
+        self.apply_edits(edits, selection, true)
+    }
+
+    fn apply_edits(&mut self, edits: &[Replace], selection: Cursor, exact: bool) -> bool {
         self.close_open();
         let Some(order) = self.content.with_lines(|lines| edit::ordered(edits, lines)) else {
             return false;
@@ -746,10 +817,14 @@ impl EditorView {
             .min()
             .unwrap_or(0);
         for replace in order.iter().rev() {
-            let ending = self.content.with_lines(|lines| {
-                edit::break_ending(lines, replace.start, replace.end, &replace.text)
-            });
-            let text = edit::with_breaks(&replace.text, ending);
+            let text = if exact {
+                std::borrow::Cow::Borrowed(replace.text.as_str())
+            } else {
+                let ending = self.content.with_lines(|lines| {
+                    edit::break_ending(lines, replace.start, replace.end, &replace.text)
+                });
+                edit::with_breaks(&replace.text, ending)
+            };
             self.content
                 .replace_range(replace.start, replace.end, &text);
             let last = replace.start.line + wren_markdown::line_ranges(&text).count();
@@ -2583,6 +2658,18 @@ impl EditorView {
 /// A focused press of `key` with `modifiers`, as a window would deliver it:
 /// its own physical key, and the text it types, which a character types
 /// unless Ctrl or the logo key is held (or Alt, off macOS).
+/// An input of a batch of events ([`EditorView::batch_messages`]).
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone)]
+pub enum BatchInput {
+    /// A key pressed with these modifiers, typing as
+    /// [`EditorView::key_message`] has it.
+    Key(iced::keyboard::Key, iced::keyboard::Modifiers),
+    /// A right-click on the middle of the character that starts at byte
+    /// `column` of `line`.
+    RightClick { line: usize, column: usize },
+}
+
 fn key_press(
     key: iced::keyboard::Key,
     modifiers: iced::keyboard::Modifiers,
@@ -5782,6 +5869,73 @@ mod tests {
                 ev.content.lay_out(size);
                 assert_eq!(ev.first_visible_line(), top, "restoring {origin_cursor:?}");
                 assert_eq!(ev.cursor(), origin_cursor);
+            }
+        }
+
+        #[test]
+        fn an_exact_edit_keeps_the_line_endings_it_is_written_with() {
+            let block = "---\r\ntasks: off\r\n---\r\n";
+            let mut ev = editor("body\nmore\n");
+            ev.move_cursor(super::at(1, 2));
+            let top = Position { line: 0, column: 0 };
+            // The same text through `apply` takes the body's endings.
+            assert!(ev.apply(&[Replace::insert(top, block)], super::at(4, 2)));
+            assert_eq!(ev.text(), "---\ntasks: off\n---\nbody\nmore\n");
+            assert!(ev.undo());
+            assert!(ev.apply_exact(&[Replace::insert(top, block)], super::at(4, 2)));
+            assert_eq!(ev.text(), format!("{block}body\nmore\n"));
+            assert_eq!(ev.cursor(), super::at(4, 2));
+            // One step, and two edits made together are one step too.
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "body\nmore\n");
+            assert!(!ev.can_undo());
+            let end = Position { line: 2, column: 0 };
+            let edits = [Replace::insert(top, "a\r\n"), Replace::insert(end, "z\r")];
+            assert!(ev.apply_exact(&edits, super::at(0, 0)));
+            assert_eq!(ev.text(), "a\r\nbody\nmore\nz\r");
+            assert!(ev.undo());
+            assert_eq!(ev.text(), "body\nmore\n");
+            assert!(!ev.can_undo());
+        }
+
+        #[test]
+        fn an_edit_applied_away_from_the_view_leaves_the_view_in_place() {
+            let size = iced::Size::new(300.0, 240.0);
+            let selected = Cursor {
+                position: Position { line: 5, column: 4 },
+                selection: Some(Position { line: 5, column: 0 }),
+            };
+            // An edit on the cursor's line, above it, and far below the view.
+            for (cursor, line) in [(super::at(2, 3), 2), (selected, 1), (super::at(2, 0), 250)] {
+                let mut ev = editor(&super::numbered_lines(300));
+                ev.content.lay_out(size);
+                ev.move_cursor(cursor);
+                ev.content.lay_out(size);
+                ev.perform(Action::Scroll { lines: 100 });
+                ev.content.lay_out(size);
+                let top = ev.first_visible_line();
+                assert!(top > 50, "scrolled to {top}");
+
+                // As a host does it: the view first, then the edit with the
+                // cursor where its text went, then the view again.
+                let origin = ev.viewport();
+                let landing = if line == cursor.position.line {
+                    super::at(line, cursor.position.column + 2)
+                } else {
+                    cursor
+                };
+                let insert = Replace::insert(Position { line, column: 0 }, "x ");
+                assert!(ev.apply(&[insert], landing));
+                ev.restore_viewport(origin.with_cursor(ev.cursor()));
+                ev.content.lay_out(size);
+                assert_eq!(ev.cursor(), landing, "line {line}");
+                // iced's next update after an edit reveals the cursor.
+                if KIND == BackendKind::Owned {
+                    assert_eq!(ev.first_visible_line(), top, "line {line}");
+                }
+                assert!(ev.undo(), "one step");
+                assert!(!ev.can_undo());
+                assert_eq!(ev.text(), super::numbered_lines(300));
             }
         }
 

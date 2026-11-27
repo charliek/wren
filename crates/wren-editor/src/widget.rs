@@ -914,6 +914,11 @@ impl<'a> TextEditor<'a> {
                                     at: position,
                                     seen: Seen::new(self.edition, fingerprint),
                                 };
+                                let holds = answer == Answer::Keyboard
+                                    && matches!(
+                                        self.providers.get(provider),
+                                        Some(Provider::Host(host)) if host.holds_escape()
+                                    );
                                 // The menu as the editor will open it: the
                                 // next popover it opens.
                                 let answer = match answer {
@@ -929,6 +934,9 @@ impl<'a> TextEditor<'a> {
                                     self.sources,
                                     answer,
                                 );
+                                if holds {
+                                    self.menu_now.hand_over(true);
+                                }
                             }
                         }
                         shell.capture_event();
@@ -1216,7 +1224,8 @@ impl<'a> TextEditor<'a> {
         // the widget knows of the caret's line, and the batch's Escape
         // after it is no one's either.
         if let Some((id, source)) = request.zip(self.sources.menus) {
-            if source.holds_escape(id) {
+            let taken = matches!(self.menu_now.live(), Some((Opened::Keyboard, _)));
+            if source.holds_escape(id) || (taken && source.holds_escape_when_taken(id)) {
                 self.menu_now.hand_over(true);
             }
         }
@@ -1909,6 +1918,39 @@ impl Focus {
             && ((self.now - self.updated_at).as_millis() / Self::CURSOR_BLINK_INTERVAL_MILLIS)
                 .is_multiple_of(2)
     }
+}
+
+/// What `editor`, at the window's origin `size` large, laid out and with
+/// the keyboard, publishes for `events` as one batch, in order. A pointer
+/// event's place is in the text's coordinates, or `None` with the pointer
+/// off the window.
+#[cfg(feature = "test-support")]
+pub(crate) fn batch_of(
+    editor: &mut TextEditor<'_>,
+    size: Size,
+    events: Vec<(Event, Option<Point>)>,
+) -> Vec<Message> {
+    let mut state = State::new(editor.highlighter_settings);
+    editor.lay_out(&mut state, size);
+    state.focus = Some(Focus::now());
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    let padding = editor.padding(size.width, state.advance.width);
+    let mut messages = Vec::new();
+    for (event, at) in events {
+        let cursor = at.map_or(mouse::Cursor::Unavailable, |at| {
+            mouse::Cursor::Available(Point::new(at.x + padding.left, at.y + padding.top))
+        });
+        let mut shell = Shell::new(&mut messages);
+        editor.on_event(
+            &mut state,
+            &event,
+            bounds,
+            cursor,
+            &mut clipboard::Null,
+            &mut shell,
+        );
+    }
+    messages
 }
 
 impl operation::Focusable for State {

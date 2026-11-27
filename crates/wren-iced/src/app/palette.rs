@@ -492,14 +492,18 @@ impl App {
         match mode {
             Mode::Commands => {
                 // A board's commands are listed only while one is open, and
-                // the Markdown ones are not then (§5.1 rule 8).
+                // the Markdown ones are not then (§5.1 rule 8), nor the task
+                // line commands; Show tasks is the app's.
                 let board = self.surface() == Surface::Board;
                 for group in GROUPS {
-                    if board && matches!(group, "Markdown" | "Tasks") {
+                    if board && group == "Markdown" {
                         continue;
                     }
                     for definition in definitions().filter(|definition| {
                         definition.group == group
+                            && !(board
+                                && group == "Tasks"
+                                && definition.scope == CommandScope::Editor)
                             && (self.preferences.boards || !definition.id.boards())
                             && (self.preferences.tasks || !definition.id.tasks())
                             && (board || definition.scope != CommandScope::Board)
@@ -751,15 +755,13 @@ impl App {
                 if let Some(target) = source {
                     for id in item_commands(item)
                         .iter()
-                        .filter(|id| self.preferences.tasks || !id.tasks())
+                        .filter(|id| self.item_command_offered(item, **id))
                     {
-                        let definition = definitions()
-                            .find(|entry| entry.id == *id)
-                            .expect("item command definition");
-                        if fuzzy_score(&query, definition.label).is_some() {
+                        let title = self.item_action_title(item, *id);
+                        if fuzzy_score(&query, &title).is_some() {
                             rows.push(action_row(
                                 Key::ItemAction { target, id: *id },
-                                definition.label.into(),
+                                title,
                                 self.item_name(item).unwrap_or("Removed item").into(),
                                 self.item_target_valid(target),
                                 Action::ItemCommand { target, id: *id },

@@ -11,7 +11,7 @@ use wren_core::ops::Op;
 use super::board::Surface;
 use super::palette::{Mode, SearchTarget};
 use super::workspace::DialogKind;
-use super::{focus_editor, App, Message};
+use super::{App, Message};
 use crate::board_export::Format;
 use crate::panes::Pane;
 
@@ -96,6 +96,14 @@ pub enum CommandId {
     TaskSetDue,
     TaskClearDue,
     TaskEdit,
+    /// The task view of where the keyboard is (`tasks.show`).
+    ShowTasks,
+    /// Hide the selected group's tasks from task views, or show them again.
+    HideGroupTasks,
+    /// Hide the selected note's tasks (`tasks: off`), or show them again.
+    HideNoteTasks,
+    /// Show or hide the columns' task counts (`task-counts`).
+    ToggleTaskCounts,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -350,6 +358,32 @@ definitions![
         "Create or edit task…",
         "Tasks",
         Editor
+    ),
+    // The ways into the task view (item 10.2), App commands listed only
+    // while the `tasks` setting is on. Show tasks opens the view of where
+    // the keyboard is (`App::show_tasks_scope`); the two hides act on the
+    // selected group and note, and a row's actions offer them for its own.
+    (ShowTasks, "tasks.show", "Show tasks", "Tasks", App),
+    (
+        HideNoteTasks,
+        "note.hide_tasks",
+        "Hide tasks in this note",
+        "This note",
+        App
+    ),
+    (
+        HideGroupTasks,
+        "group.hide_tasks",
+        "Hide tasks from this group",
+        "Workspace",
+        App
+    ),
+    (
+        ToggleTaskCounts,
+        "view.toggle_task_counts",
+        "Toggle task counts",
+        "View",
+        App
     ),
     (NewGroup, "group.new", "New group…", "Workspace", App),
     (NewSection, "section.new", "New section…", "Workspace", App),
@@ -1080,6 +1114,16 @@ impl CommandId {
         self.task_change().is_some()
             || self.task_menu().is_some()
             || matches!(self, Self::TaskSetDue | Self::TaskEdit)
+            || self.task_entry()
+    }
+
+    /// Whether the command is one of the ways into the task view or out of
+    /// it (item 10.2): App commands, unlike the task line commands.
+    pub fn task_entry(self) -> bool {
+        matches!(
+            self,
+            Self::ShowTasks | Self::HideGroupTasks | Self::HideNoteTasks | Self::ToggleTaskCounts
+        )
     }
 
     /// Whether the command exists on Linux only: the switch of Linux's
@@ -1152,6 +1196,10 @@ pub enum Command {
         name: Option<String>,
     },
     RemoveWorkspace(PathBuf),
+    /// Open the task view of a scope in the editor pane. Until the entry
+    /// points (item 10.2) only the harness sends it.
+    #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
+    ShowTasks(super::tasks_view::Scope),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1240,6 +1288,15 @@ impl App {
             {
                 "Use Ctrl for commands"
             }
+            // The hides undo themselves once done, as their titles say.
+            CommandId::HideGroupTasks | CommandId::HideNoteTasks => {
+                let item = match definition.id {
+                    CommandId::HideGroupTasks => self.selected_group.map(ItemRef::Group),
+                    _ => self.selected_note.map(ItemRef::Note),
+                };
+                item.and_then(|item| self.hide_title(item))
+                    .unwrap_or(definition.label)
+            }
             _ => definition.label,
         }
     }
@@ -1277,10 +1334,14 @@ impl App {
             // The find bar searches the editor's text and the outline reads
             // its Markdown headings; on a board both open the jump palette
             // (§5.18 rule 3), and a board's raw text has no headings.
-            Find => self.selected_note.is_some() || !self.workspace_mode,
+            // Under a task view the note is not shown, and has neither.
+            Find => {
+                (self.selected_note.is_some() || !self.workspace_mode)
+                    && self.surface() != Surface::Tasks
+            }
             Outline => {
                 (self.selected_note.is_some() || !self.workspace_mode)
-                    && self.surface() != Surface::Raw
+                    && !matches!(self.surface(), Surface::Raw | Surface::Tasks)
             }
             OpenConflictCopy => self.conflict_copy_target().is_some(),
             ExportSvg | ExportPng | ExportDrawio => {
@@ -1299,6 +1360,14 @@ impl App {
             }
             TaskSetDue => self.calendar_can_open(),
             TaskEdit => self.task_form_can_open(),
+            ShowTasks => self.session.is_some(),
+            ToggleTaskCounts => true,
+            HideGroupTasks => self
+                .selected_group
+                .is_some_and(|group| self.hide_title(ItemRef::Group(group)).is_some()),
+            HideNoteTasks => self
+                .selected_note
+                .is_some_and(|note| self.hide_title(ItemRef::Note(note)).is_some()),
             // Their keys are the editor's own; see their rows.
             EditUndo | EditRedo | EditCopy | EditCut | EditPaste | EditSelectAll => false,
             SpellSuggest => {
@@ -1308,19 +1377,17 @@ impl App {
                     && self.spelling.ready()
                     && self.ensure_editor_ready().is_ok()
             }
-            Back => self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.can_back()),
-            Forward => self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.can_forward()),
-            // Only on a board, which exists only on the Board surface.
-            Board(command) => self
-                .board
-                .as_ref()
-                .is_some_and(|view| board_enabled(view, command)),
+            Back => self.can_step(true),
+            Forward => self.can_step(false),
+            // Only on a board, which exists only on the Board surface; one
+            // under a task view is not shown.
+            Board(command) => {
+                self.surface() == Surface::Board
+                    && self
+                        .board
+                        .as_ref()
+                        .is_some_and(|view| board_enabled(view, command))
+            }
         }
     }
 
@@ -1387,7 +1454,8 @@ impl App {
                 self.cancel_gestures();
                 self.focus = enabled.unwrap_or(!self.focus);
                 self.column = super::columns::Column::Editor;
-                self.finish_action(Disposition::Completed, None, focus_editor())
+                let task = self.pane_focus();
+                self.finish_action(Disposition::Completed, None, task)
             }
             Command::Width { pane, width } => {
                 if self.session.is_none() {
@@ -1432,6 +1500,7 @@ impl App {
                 outcome
             }
             Command::RemoveWorkspace(path) => self.remove_registration(&path),
+            Command::ShowTasks(scope) => self.show_tasks(scope),
         }
     }
 
@@ -1545,7 +1614,8 @@ impl App {
             }
             Back | Forward => {
                 self.column = super::columns::Column::Editor;
-                let outcome = self.process_core(if id == Back { Op::Back } else { Op::Forward });
+                // Through notes and task views alike.
+                let outcome = self.history_step(id == Back);
                 if outcome.processed.disposition.committed() {
                     self.palette = None;
                     self.reveal_selection();
@@ -1605,6 +1675,7 @@ impl App {
             ReloadSettings => {
                 self.palette = None;
                 let warning = self.reload_settings(true);
+                let task = self.pane_focus();
                 self.finish_action(
                     if warning.is_some() {
                         Disposition::CommittedWarning
@@ -1612,7 +1683,7 @@ impl App {
                         Disposition::Completed
                     },
                     warning,
-                    focus_editor(),
+                    task,
                 )
             }
             ToggleTask if self.preferences.tasks => self.run_task_command(id),
@@ -1625,6 +1696,19 @@ impl App {
             }
             TaskSetDue => self.run_set_due(),
             TaskEdit => self.run_task_form(),
+            ShowTasks => match self.show_tasks_scope() {
+                Some(scope) => self.dispatch(Command::ShowTasks(scope)),
+                None => self.blocked("There is nothing to show the tasks of"),
+            },
+            ToggleTaskCounts => self.toggle_task_counts(),
+            HideGroupTasks => {
+                let group = self.selected_group.expect("enabled group");
+                self.toggle_group_tasks(group)
+            }
+            HideNoteTasks => {
+                let note = self.selected_note.expect("enabled note");
+                self.toggle_note_tasks(note)
+            }
             EditUndo | EditRedo | EditCopy | EditCut | EditPaste | EditSelectAll => {
                 self.blocked("Press the key in the editor")
             }
@@ -1688,7 +1772,7 @@ impl App {
         if !self.item_target_valid(target) {
             return self.blocked("The row belongs to an old workspace or a changed item");
         }
-        if !item_commands(target.item).contains(&id) {
+        if !self.item_command_offered(target.item, id) {
             return self.blocked("This action does not apply to this row");
         }
         use CommandId::*;
@@ -1705,6 +1789,21 @@ impl App {
                 _ => unreachable!("validated group action"),
             },
             ReorderSection | ReorderGroup => self.open_palette(Mode::Reorder(target.item)),
+            ShowTasks => match self
+                .model()
+                .and_then(|model| super::tasks_view::Scope::of(target.item, model))
+            {
+                Some(scope) => self.dispatch(Command::ShowTasks(scope)),
+                None => self.blocked("The item no longer exists"),
+            },
+            HideGroupTasks => match target.item {
+                ItemRef::Group(group) => self.toggle_group_tasks(group),
+                _ => unreachable!("validated group action"),
+            },
+            HideNoteTasks => match target.item {
+                ItemRef::Note(note) => self.toggle_note_tasks(note),
+                _ => unreachable!("validated note action"),
+            },
             _ => self.blocked("This action does not apply to this row"),
         }
     }
@@ -1838,18 +1937,37 @@ impl App {
     }
 }
 
+/// A row's actions, in the order its palette lists them. The task rows
+/// (item 10.2) come last and exist only while the `tasks` setting is on,
+/// and Hide tasks in this note only for a Markdown note
+/// ([`App::item_command_offered`]).
 pub(super) fn item_commands(item: ItemRef) -> &'static [CommandId] {
     use CommandId::*;
     match item {
-        ItemRef::Section(_) => &[RenameSection, DeleteSection, RevealSection, ReorderSection],
+        ItemRef::Section(_) => &[
+            RenameSection,
+            DeleteSection,
+            RevealSection,
+            ReorderSection,
+            ShowTasks,
+        ],
         ItemRef::Group(_) => &[
             RenameGroup,
             DeleteGroup,
             RevealGroup,
             MoveGroup,
             ReorderGroup,
+            ShowTasks,
+            HideGroupTasks,
         ],
-        ItemRef::Note(_) => &[RenameNote, DeleteNote, RevealNote, MoveNote],
+        ItemRef::Note(_) => &[
+            RenameNote,
+            DeleteNote,
+            RevealNote,
+            MoveNote,
+            ShowTasks,
+            HideNoteTasks,
+        ],
     }
 }
 

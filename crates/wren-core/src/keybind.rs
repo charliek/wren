@@ -571,10 +571,17 @@ pub fn default_board_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
 /// `task.set_due` is Mod+D, and `task.edit`, the task form, Mod+Shift+Enter
 /// (discovery/tasks.md §2 item 21): Editor commands, so the board layer's
 /// Mod+D, which only a focused board reads, keeps duplicating there.
+/// `tasks.show`, the task view of where the keyboard is, is Mod+Shift+T
+/// (discovery/tasks-build.md §10, 2026-11-26): an App command, on a key
+/// neither layer binds in any mode.
 pub fn default_task_bindings(scheme: Scheme) -> Vec<(String, &'static str)> {
     resolved(
         scheme,
-        owned(&[("mod+d", "task.set_due"), ("mod+shift+enter", "task.edit")]),
+        owned(&[
+            ("mod+d", "task.set_due"),
+            ("mod+shift+enter", "task.edit"),
+            ("mod+shift+t", "tasks.show"),
+        ]),
     )
 }
 
@@ -840,6 +847,7 @@ mod tests {
     const MAC_TASK: &[(&str, &str)] = &[
         ("super+d", "task.set_due"),
         ("super+shift+enter", "task.edit"),
+        ("super+shift+t", "tasks.show"),
     ];
 
     /// The macOS board layer as it was.
@@ -1108,13 +1116,27 @@ mod tests {
     #[test]
     fn the_linux_tables_follow_the_mode() {
         for (scheme, base, task, board) in [
-            (CTRL, CTRL_BASE, ["ctrl+d", "ctrl+shift+enter"], CTRL_BOARD),
-            (ALT, ALT_BASE, ["alt+d", "alt+shift+enter"], ALT_BOARD),
+            (
+                CTRL,
+                CTRL_BASE,
+                ["ctrl+d", "ctrl+shift+enter", "ctrl+shift+t"],
+                CTRL_BOARD,
+            ),
+            (
+                ALT,
+                ALT_BASE,
+                ["alt+d", "alt+shift+enter", "alt+shift+t"],
+                ALT_BOARD,
+            ),
         ] {
             assert_eq!(default_bindings(scheme), literal(base), "{scheme:?}");
             assert_eq!(
                 default_task_bindings(scheme),
-                literal(&[(task[0], "task.set_due"), (task[1], "task.edit")]),
+                literal(&[
+                    (task[0], "task.set_due"),
+                    (task[1], "task.edit"),
+                    (task[2], "tasks.show")
+                ]),
                 "{scheme:?}"
             );
             let defaults = default_board_bindings(scheme);
@@ -1164,7 +1186,7 @@ mod tests {
             (ALT, "alt+d", "alt+shift+enter"),
         ] {
             assert_eq!(
-                default_task_bindings(scheme),
+                default_task_bindings(scheme)[..2],
                 [
                     (trigger.to_string(), "task.set_due"),
                     (form.to_string(), "task.edit")
@@ -1505,6 +1527,57 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Show tasks' Mod+Shift+T (tasks-build §10, 2026-11-26) is free in
+    /// every layer and mode: the base layer and the board layer bind it to
+    /// nothing, nor its Mod-less or Shift-less forms to anything the key
+    /// could be taken for, and it is none of the chords IBus takes on
+    /// GNOME (Ctrl+Shift+U, Ctrl+., Ctrl+;, Ctrl+Space, Super+Space).
+    #[test]
+    fn show_tasks_takes_a_key_no_layer_binds_in_any_mode() {
+        for (scheme, trigger) in [
+            (MAC, "super+shift+t"),
+            (CTRL, "ctrl+shift+t"),
+            (ALT, "alt+shift+t"),
+        ] {
+            let key = accel(trigger);
+            let tasks = default_task_bindings(scheme);
+            assert_eq!(
+                tasks
+                    .iter()
+                    .filter(|(_, action)| *action == "tasks.show")
+                    .count(),
+                1
+            );
+            assert!(tasks.contains(&(trigger.to_string(), "tasks.show")));
+            for (bound, action) in both_defaults(scheme) {
+                assert_ne!(accel(&bound), key, "{scheme:?}: {bound} → {action}");
+            }
+            let (keymap, _) = Keymap::build(scheme, both_defaults(scheme), &[], by_name);
+            assert_eq!(keymap.action(&key), None, "{scheme:?}");
+            assert_eq!(keymap.board_action(&key), None, "{scheme:?}");
+            for ibus in [
+                "ctrl+shift+u",
+                "ctrl+period",
+                "ctrl+semicolon",
+                "ctrl+space",
+                "super+space",
+            ] {
+                assert_ne!(accel(ibus), key, "{scheme:?}");
+            }
+            // The other Linux mode's Show tasks is no default there.
+            let other = scheme.resolve("opt+shift+t");
+            let (with_tasks, _) = Keymap::build(
+                scheme,
+                both_defaults(scheme).into_iter().chain(tasks),
+                &[],
+                by_name,
+            );
+            assert_eq!(with_tasks.action(&key), Some("tasks.show"), "{scheme:?}");
+            assert_eq!(with_tasks.action(&accel(&other)), None, "{scheme:?}");
+            assert_eq!(with_tasks.board_action(&key), None, "{scheme:?}");
         }
     }
 

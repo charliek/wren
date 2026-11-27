@@ -21,7 +21,8 @@ use super::{App, Message};
 use crate::board_export::{self, Format};
 use crate::fonts;
 
-/// What shows the open note. Only this surface may write its draft.
+/// What the editor pane shows. Of the three that show the open note, only
+/// the one showing it may write its draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Surface {
     /// A Markdown note, or no note at all, in the editor.
@@ -32,6 +33,23 @@ pub(super) enum Surface {
     /// board again when it is next opened, or when its text changes
     /// underneath the editor into one that parses; never while it is typed in.
     Raw,
+    /// A task view, in place of the open note (`tasks_view.rs`). The note
+    /// stays the Session's document, and neither the editor nor the board
+    /// viewer is mounted, so neither takes input.
+    Tasks,
+}
+
+impl Surface {
+    /// The surface's name, as the harness reports it.
+    #[cfg(feature = "smoke-test")]
+    pub(super) const fn key(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Board => "board",
+            Self::Raw => "raw",
+            Self::Tasks => "tasks",
+        }
+    }
 }
 
 /// Where each board opened in this run was last looked at from. It is
@@ -72,7 +90,19 @@ pub(super) fn close(view: &BoardView, note: NoteId, viewports: &mut Viewports) {
 }
 
 impl App {
+    /// What the pane shows, which decides whose commands and input run.
     pub(super) fn surface(&self) -> Surface {
+        if self.task_view().is_some() {
+            Surface::Tasks
+        } else {
+            self.document_surface()
+        }
+    }
+
+    /// What shows the open note, or would with no task view over it: the
+    /// editor's and the board viewer's own state follows this, so a view
+    /// coming and going changes nothing in either.
+    pub(super) fn document_surface(&self) -> Surface {
         if self.board.is_some() {
             Surface::Board
         } else if self.board_error.is_some() {
@@ -116,6 +146,11 @@ impl App {
     pub(super) fn board_edit(&mut self, message: wren_canvas::Message) -> Task<Message> {
         use wren_canvas::Message as Sent;
         let held = self.dialog.is_some() || self.palette.is_some() || self.loading.is_some();
+        // A board under a task view is not mounted: whatever is addressed
+        // to it was meant for the board as it showed, and is dropped.
+        if self.surface() == Surface::Tasks {
+            return Task::none();
+        }
         let Some(view) = &mut self.board else {
             return Task::none();
         };
@@ -471,9 +506,19 @@ impl App {
     /// `note.export_svg`, `note.export_png` and `note.export_drawio`: make
     /// the open board's document now, as it is drawn, and ask where to save
     /// it.
+    /// The board an export draws: the one in the pane. A board under a
+    /// task view is not shown, and is not exported.
+    fn exported_board(&self) -> Result<&BoardView, String> {
+        self.board
+            .as_ref()
+            .filter(|_| self.surface() == Surface::Board)
+            .ok_or_else(|| "The open note is not shown as a board".into())
+    }
+
     pub(super) fn export_board(&mut self, format: Format) -> Gateway {
-        let Some(view) = &self.board else {
-            return self.blocked("The open note is not shown as a board");
+        let view = match self.exported_board() {
+            Ok(view) => view,
+            Err(error) => return self.blocked(error),
         };
         if let Some(busy) = self.export_busy() {
             return self.blocked(busy);
@@ -666,10 +711,7 @@ impl App {
         format: Format,
         request: &std::sync::Arc<crate::test_ipc::Request>,
     ) -> Result<Task<Message>, String> {
-        let view = self
-            .board
-            .as_ref()
-            .ok_or("The open note is not shown as a board")?;
+        let view = self.exported_board()?;
         if let Some(busy) = self.export_busy() {
             return Err(busy);
         }
@@ -895,6 +937,7 @@ z = "c"
     #[track_caller]
     pub fn assert_in_step(app: &App, expected: Surface) {
         assert_eq!(app.surface(), expected);
+        assert_eq!(app.document_surface(), expected);
         let document = app.session.as_ref().unwrap().document();
         assert_eq!(app.editor_note, document.map(|document| document.note));
         let text = session_text(app);
@@ -914,6 +957,7 @@ z = "c"
                 assert_eq!(app.editor.text(), text);
                 assert!(app.board_error.is_none());
             }
+            Surface::Tasks => unreachable!("a task view is no document's surface"),
         }
     }
 

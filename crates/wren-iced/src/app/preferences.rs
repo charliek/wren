@@ -662,7 +662,7 @@ impl App {
     /// Whether the editor's Markdown keys act: as the setting says, and
     /// never in a board's raw text, which is not Markdown.
     fn markdown_assist(&self) -> bool {
-        self.preferences.settings.markdown_assist && self.surface() != Surface::Raw
+        self.preferences.settings.markdown_assist && self.document_surface() != Surface::Raw
     }
 
     /// Bring the editor's Markdown keys, its task menus and its
@@ -692,7 +692,7 @@ impl App {
         if kind == self.editor.backend() {
             return;
         }
-        let text = if self.surface() == Surface::Board {
+        let text = if self.document_surface() == Surface::Board {
             String::new()
         } else {
             self.session
@@ -782,7 +782,9 @@ impl App {
     /// for `None`, and save it. At either limit this is a no-op.
     ///
     /// On a board the same commands zoom it instead, one stop up or down or
-    /// back to 100 %: a look at the board, which changes no setting.
+    /// back to 100 %: a look at the board, which changes no setting. Only
+    /// a board on show: one under a task view is left as it is, and the
+    /// text size changes as over a note.
     pub(super) fn step_text_size(&mut self, delta: Option<f32>) -> Gateway {
         let current = self.preferences.settings.editor_font_size;
         let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
@@ -795,7 +797,8 @@ impl App {
         } else {
             Task::none()
         };
-        if let Some(board) = &mut self.board {
+        let shown = self.surface() == Surface::Board;
+        if let Some(board) = self.board.as_mut().filter(|_| shown) {
             match delta {
                 Some(delta) if delta > 0.0 => board.zoom_step(1),
                 Some(delta) if delta < 0.0 => board.zoom_step(-1),
@@ -826,6 +829,25 @@ impl App {
         let enabled = !self.preferences.settings.spell_check;
         self.preferences.settings.spell_check = enabled;
         self.save_toggle("spell-check", if enabled { "on" } else { "off" })
+    }
+
+    /// Show or hide the columns' task counts, and save the choice
+    /// (`task-counts`). The message after it offers to flip it back.
+    pub(super) fn toggle_task_counts(&mut self) -> Gateway {
+        let shown = !self.preferences.settings.task_counts;
+        self.preferences.settings.task_counts = shown;
+        self.apply_preferences();
+        let task = if self.palette.take().is_some() {
+            self.column_focus()
+        } else {
+            Task::none()
+        };
+        // The message says it was saved only when config.conf was written;
+        // either way the change holds for this session and can be undone.
+        let (written, warning) =
+            self.write_setting("task-counts", if shown { "on" } else { "off" });
+        self.notify(super::notice::Notice::counts(shown, written));
+        self.saved(warning, task)
     }
 
     /// Move the editor to the other engine, keeping its text and cursor
@@ -877,6 +899,7 @@ impl App {
             }),
             CommandId::SwitchEngine => Some(settings.editor_engine.value()),
             CommandId::ToggleSpellCheck => Some(if settings.spell_check { "on" } else { "off" }),
+            CommandId::ToggleTaskCounts => Some(if settings.task_counts { "on" } else { "off" }),
             _ => None,
         }
     }
@@ -884,15 +907,23 @@ impl App {
     /// Write one setting to `config.conf`, then re-read the merged file so
     /// edits made outside Wren since the last reload apply now rather than
     /// being marked as seen. Returns the warning to report, if any.
-    fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
-        let path = self.preferences.path.clone()?;
+    pub(super) fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
+        self.write_setting(key, value).1
+    }
+
+    /// [`App::save_setting`], saying too whether `config.conf` was
+    /// written: not with no settings location, nor when the write failed.
+    pub(super) fn write_setting(&mut self, key: &str, value: &str) -> (bool, Option<String>) {
+        let Some(path) = self.preferences.path.clone() else {
+            return (false, None);
+        };
         match settings::write_value(&path, key, value) {
-            Ok(()) => self.reload_settings(true),
+            Ok(()) => (true, self.reload_settings(true)),
             Err(error) => {
                 let warning = format!("Could not save {key} to {}: {error}", path.display());
                 self.banner = Some(warning.clone());
                 self.banner_kind = workspace::WarningKind::General;
-                Some(warning)
+                (false, Some(warning))
             }
         }
     }
@@ -1098,12 +1129,18 @@ impl App {
 
     /// Route a key press: overlays first, then the keymap.
     pub(super) fn key_input(&mut self, input: Input) -> Task<Message> {
-        // A press of Escape the calendar's field took: it was the
-        // calendar's alone.
-        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape))
-            && (self.take_calendar_escape() || self.take_form_escape())
-        {
+        // A plain Escape a widget took (the calendar, the task form, or a
+        // popover of the editor's) was that widget's alone.
+        if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape)) && self.take_escape_claim() {
             return Task::none();
+        }
+        // A shortcut the task view dropped with the rest of a batch a key
+        // of its stopped, or ran itself: each copy is matched to its own
+        // report, before anything that opened in the batch can read it.
+        if let Input::Accel(accel) = &input {
+            if self.preferences.tasks && self.take_task_list_shortcut(accel) {
+                return Task::none();
+            }
         }
         // The task form owns the keyboard: its own keys took what it gives
         // a meaning, Escape and its save keys included (`form_keys.rs`), so
@@ -1128,13 +1165,9 @@ impl App {
             };
         }
         let accel = match input {
-            // A press the editor's popover has already taken, in the key's
-            // order with the typing around it, does nothing more here. The
-            // suggestions menu is closed from here instead: the editor
-            // leaves it Escape with no word.
-            Input::Nav(Nav::Escape | Nav::FieldEscape)
-                if self.editor.take_claimed_escape() || self.editor.dismiss_popover() =>
-            {
+            // The suggestions menu is closed from here: the editor leaves
+            // it Escape with no word.
+            Input::Nav(Nav::Escape | Nav::FieldEscape) if self.editor.dismiss_popover() => {
                 return Task::none();
             }
             Input::Nav(Nav::Escape) => return self.update(Message::Escape),
@@ -1177,7 +1210,16 @@ impl App {
                         _ => Task::none(),
                     };
                 }
-                if self.dialog.is_some() || !self.column.is_browser() {
+                if self.dialog.is_some() {
+                    return Task::none();
+                }
+                // The task view in the pane has the keyboard: its key
+                // wrapper read the key (`list_keys.rs`), never the note's
+                // under it.
+                if self.task_view_has_keys() {
+                    return Task::none();
+                }
+                if !self.column.is_browser() {
                     return Task::none();
                 }
                 return match nav {

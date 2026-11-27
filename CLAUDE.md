@@ -45,8 +45,14 @@ when one lands, move what users need into `docs/` and trim the note.
   `keybind.rs` (triggers, platform default bindings, and the board
   layer), `kind.rs` (`NoteKind`, the kind a file name gives), and
   `theme.rs` (built-in palettes, with each theme's board hues and its task
-  date and owner colours), and `owners.rs` (the `@owner`s that suggestions
-  offer, read from the search index's notes).
+  date and owner colours), `tasks.rs` (the task index: a record for each
+  task line, fed by `index.rs` wherever it takes a note's text, queried by
+  path, and built only with tasks on), `tasks_file.rs` (the app-managed
+  `.wren/tasks.toml`: folder exclusions and each view's filters),
+  `task_write.rs` (the line and front-matter plans a write from outside
+  the editor makes, for `Op::EditTaskLine` and `Op::EditTaskSwitch`), and
+  `owners.rs` (the `@owner`s that suggestions offer, read from the task
+  index's records).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
   types so it can be extracted later. It must not depend on `wren-core` or
   `wren-spell`, or know app messages; the host passes in a `Style`, a
@@ -95,11 +101,22 @@ when one lands, move what users need into `docs/` and trim the note.
     room), `app/task_suggest.rs` (suggestions and the owner cache),
     `app/calendar.rs` with `date_field.rs` (the calendar overlay and its
     text field), `app/task_form.rs` with `form_keys.rs` (the task form and
-    its key wrapper), `app/tasks_harness.rs` (the `tasks.*` test requests)
+    its key wrapper), `app/tasks_view.rs` (the task view's surface in the
+    editor pane, its scope, and its stops in Back and Forward history),
+    `app/task_list.rs` (the view's list as data: filters, groups, order and
+    held rows), `app/task_list_view.rs` (its controls, rows, keys and
+    footer), `list_keys.rs` (the view's key wrapper), `app/host_menu.rs`
+    (a menu the app draws over the view), `app/task_target.rs` (the one
+    write path for a row or the open note, and undo), `app/task_rows.rs`
+    (a row's keys, clicks and writes), `app/task_describe.rs` (a row's
+    description edited in place), `app/task_entry.rs` (header counts,
+    Show tasks, the two hides and their marks), `app/notice.rs` (the
+    message with Undo), `app/tasks_harness.rs` (the `tasks.*` test requests)
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
-    keys, from the keymap), and `layers.rs` (a stack whose layers
+    keys, from the keymap), `line_field.rs` (a one-line field that hands
+    Enter and Escape to its host), and `layers.rs` (a stack whose layers
     all hear a press something before them took).
   - `macos_menu.rs` is the native menu bar, built from the table in
     `menu.rs`, which is compiled on macOS, in tests and with `smoke-test`
@@ -185,11 +202,23 @@ when one lands, move what users need into `docs/` and trim the note.
 - Settle before any non-passive op: `App::settle_board()` commits an open
   label, cancels a gesture and drops a preview before a note switch, a
   palette or dialog, a blur, or quit, so a flush never writes half a drag.
+- A task view is not a document. While `Surface::Tasks` shows, the note
+  under it stays `Session.document`, and neither the editor nor the board
+  viewer is mounted: `App::edit` and `App::board_edit` drop what is
+  addressed to them, and the keyboard goes to the view
+  (`App::pane_focus`), never to `note-editor`. A view's stops in Back and
+  Forward history live in the app (`tasks_view::Trail`), hung after the
+  Session's visits by their serials; the Session's history holds notes
+  only, so nothing of a view is written to `.wren/workspace.toml`. Back
+  and Forward run through `App::history_step`, and a view opens through
+  `Command::ShowTasks`.
 - With `tasks = off` (restart-only) the shared classifier
   accepts only the boxes it always did, the toggle writes no stamp, and no
   task command, key or file exists (the harness's `tasks.get` alone still
   answers, `{"tasks": false}`): `tasks_baseline.rs` and
-  `test_tasks_baseline.py` pin it. Task dates come from `App::today()`,
+  `test_tasks_baseline.py` pin it. No task index is built, and
+  `.wren/tasks.toml` is neither read nor written; with tasks on it is
+  created only once something is set. Task dates come from `App::today()`,
   which `WREN_TEST_TODAY` pins under `smoke-test`. A structured change to an
   existing task (menus, commands, suggestions, the form's edits) goes
   through `wren_markdown::task::edit`, as one `EditPlan` that carries the
@@ -221,6 +250,7 @@ ICED_BACKEND=tiny-skia make smoke-x11   # real-window functional suite under Xvf
 make smoke-wayland               # same suite on headless Weston, minus X11-native cases
 uv run --locked --group docs zensical build --strict  # docs site; run for changes under docs/
 make fuzz-board && make perf-board   # after changing wren-board; perf-board needs a quiet machine
+make perf-tasks                  # after changing the task index (wren-core `tasks.rs`); a quiet machine
 ```
 
 - Task changes: `make smoke-tasks` runs `tools/wrentest/test_tasks_*.py` on

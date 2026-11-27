@@ -43,6 +43,12 @@
 //! names no date writes nothing and stays open. A click on a day, or on a
 //! quick pick, writes that day; Clear removes the due date. Closing gives
 //! the editor back the keyboard, except to the palette or a dialog.
+//!
+//! It also opens for a row of the task view ([`Target::Row`]), hung under
+//! the row's due cell, and writes the date through the one path every
+//! write from the view takes (`App::write_task_row`, `task_target.rs`),
+//! which finds the task where the row has it or refuses. It closes,
+//! writing nothing, once the view has gone.
 
 use iced::widget::{
     button, column, container, mouse_area, opaque, pin, rich_text, row, span, stack,
@@ -57,8 +63,10 @@ use wren_markdown::span::SpanKind;
 use wren_markdown::task::{self, Change};
 use wren_markdown::{Pos, Selection};
 
+use super::board::Surface;
 use super::commands::{CommandId, Disposition, Gateway};
 use super::task_menus::TaskMenus;
+use super::task_target::RowTarget;
 use super::{App, Message};
 use crate::date_field::{self, FieldEvent};
 use crate::{chrome, fonts, theme};
@@ -90,38 +98,64 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub(super) struct Open {
     pub(super) model: Calendar,
-    /// The note it was opened over, and its text's revision then.
-    note: Option<NoteId>,
-    revision: u64,
-    /// The line of the task's box, which the due date is written on, and
-    /// its text when the calendar opened.
-    line: usize,
-    text: String,
+    /// The task the date is written to.
+    target: Target,
     /// The task has a due token, which Clear removes.
     has_due: bool,
-    /// Where the card hangs: the due token, or the caret.
-    anchor: Anchor,
-    /// The anchor's place when the calendar opened, for a frame in which
-    /// the editor cannot say.
-    opened_at: Option<Rectangle>,
-    /// The first line in view when it opened: a scroll closes it.
-    top: usize,
-    /// A word on the task's line that the date written takes the place of:
-    /// the `du` a suggestion opened it for (`task_suggest.rs`). Cancelled,
-    /// the word stays.
-    erase: Option<std::ops::Range<usize>>,
     /// An input method is composing in the field, as it last said.
     composing: bool,
 }
 
+/// The task the calendar writes its date to.
+#[derive(Debug, Clone)]
+enum Target {
+    /// A task of the note in the editor.
+    Editor {
+        /// The note it was opened over, and its text's revision then.
+        note: Option<NoteId>,
+        revision: u64,
+        /// The line of the task's box, which the due date is written on,
+        /// and its text when the calendar opened.
+        line: usize,
+        text: String,
+        /// Where the card hangs: the due token, or the caret.
+        anchor: Anchor,
+        /// The anchor's place when the calendar opened, for a frame in
+        /// which the editor cannot say.
+        opened_at: Option<Rectangle>,
+        /// The first line in view when it opened: a scroll closes it.
+        top: usize,
+        /// A word on the task's line that the date written takes the place
+        /// of: the `du` a suggestion opened it for (`task_suggest.rs`).
+        /// Cancelled, the word stays.
+        erase: Option<std::ops::Range<usize>>,
+    },
+    /// A row of the task view, and the window's rectangle the card hangs
+    /// under: the row's due cell.
+    Row(RowTarget, Rectangle),
+}
+
+/// What a calendar over a row of the task view hangs on in the note: no
+/// place of the editor's.
+#[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
+static NO_ANCHOR: Anchor = Anchor::Caret;
+
 #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
 impl Open {
+    /// The line of the task's box, in the editor or in the row's note.
     pub(super) fn line(&self) -> usize {
-        self.line
+        match &self.target {
+            Target::Editor { line, .. } => *line,
+            Target::Row(target, _) => target.line,
+        }
     }
 
+    /// Where the card hangs in the editor's text; the caret for a row.
     pub(super) fn anchor(&self) -> &Anchor {
-        &self.anchor
+        match &self.target {
+            Target::Editor { anchor, .. } => anchor,
+            Target::Row(..) => &NO_ANCHOR,
+        }
     }
 
     pub(super) fn has_due(&self) -> bool {
@@ -175,6 +209,12 @@ impl MenuSource for TaskSource {
     /// in their batch, an Escape included, are no one's.
     fn holds_escape(&self, id: u32) -> bool {
         id == CommandId::TaskEdit.payload() && self.form.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The calendar, where it opens, holds an Escape after its request
+    /// as the form does; off a task the keys after it are the note's.
+    fn holds_escape_when_taken(&self, id: u32) -> bool {
+        id == CommandId::TaskSetDue.payload()
     }
 
     fn menu_on(&self, id: u32, index: usize, line: &str, caret: usize) -> Option<Requested> {
@@ -428,15 +468,50 @@ impl App {
         self.column = super::columns::Column::Editor;
         self.calendar = Some(Open {
             model: Calendar::new(self.today(), current),
-            note: self.selected_note,
-            revision: self.editor.revision(),
-            line,
-            text,
+            target: Target::Editor {
+                note: self.selected_note,
+                revision: self.editor.revision(),
+                line,
+                text,
+                opened_at: self.editor.anchor_bounds(&anchor),
+                anchor,
+                top: self.editor.first_visible_line(),
+                erase: None,
+            },
             has_due: due.is_some(),
-            opened_at: self.editor.anchor_bounds(&anchor),
-            anchor,
-            top: self.editor.first_visible_line(),
-            erase: None,
+            composing: false,
+        });
+        Some(iced::widget::operation::focus(FIELD))
+    }
+
+    /// Open the calendar for the task of a row of the task view, on its
+    /// due date or today, hung under `at` (the row's due cell), and give
+    /// its field the keyboard. The task's box is at byte `boxed` of its
+    /// line, as the task index found it. `None` with no task view showing,
+    /// or where there is no task there.
+    pub(super) fn open_row_calendar(
+        &mut self,
+        target: RowTarget,
+        boxed: usize,
+        at: Rectangle,
+    ) -> Option<Task<Message>> {
+        if !self.preferences.tasks || self.task_form.is_some() || self.surface() != Surface::Tasks {
+            return None;
+        }
+        let due = super::task_menus::row_task(&target.expect, boxed)?
+            .due()
+            .map(|token| token.value);
+        let current = match due {
+            Some(Parsed::Date(date)) => Some(date),
+            _ => None,
+        };
+        self.take_calendar();
+        self.palette = None;
+        self.column = super::columns::Column::Editor;
+        self.calendar = Some(Open {
+            model: Calendar::new(self.today(), current),
+            target: Target::Row(target, at),
+            has_due: due.is_some(),
             composing: false,
         });
         Some(iced::widget::operation::focus(FIELD))
@@ -457,8 +532,13 @@ impl App {
         let Some(task) = self.open_calendar(line, at) else {
             return Task::none();
         };
-        if let Some(open) = self.calendar.as_mut().filter(|open| open.line == line) {
-            open.erase = Some(range);
+        if let Some(Target::Editor {
+            line: on, erase, ..
+        }) = self.calendar.as_mut().map(|open| &mut open.target)
+        {
+            if *on == line {
+                *erase = Some(range);
+            }
         }
         task
     }
@@ -479,7 +559,8 @@ impl App {
     /// one commits next (the emoji picker's, dictation's) is the note's.
     fn take_calendar(&mut self) -> Option<Open> {
         let open = self.calendar.take()?;
-        if open.composing {
+        // A row's calendar was never over the note's text.
+        if open.composing && matches!(open.target, Target::Editor { .. }) {
             self.editor.hand_back();
         }
         Some(open)
@@ -498,15 +579,6 @@ impl App {
     /// and give the editor the keyboard for when the window has it again.
     pub(super) fn close_calendar_for_window(&mut self) -> Task<Message> {
         self.cancel_calendar()
-    }
-
-    /// Whether a press of Escape the app's key handling hears was the
-    /// calendar's, once for each: its field took it, as Escape or for an
-    /// input method's composition.
-    pub(super) fn take_calendar_escape(&mut self) -> bool {
-        let claimed = self.calendar_escapes > 0;
-        self.calendar_escapes = self.calendar_escapes.saturating_sub(1);
-        claimed
     }
 
     pub(super) fn calendar_event(&mut self, event: Event) -> Task<Message> {
@@ -572,8 +644,9 @@ impl App {
     }
 
     /// Write `due` as the task's due date, or remove it, as one undo step,
-    /// close the calendar and give the editor back the keyboard. Nothing is
-    /// written once the task's line no longer reads as it did.
+    /// close the calendar and give the editor (or the task view) back the
+    /// keyboard. Nothing is written once the task's line no longer reads as
+    /// it did.
     fn write_due(&mut self, due: Option<Date>) -> Task<Message> {
         let Some(open) = self.take_calendar() else {
             return Task::none();
@@ -585,20 +658,42 @@ impl App {
                 self.blocked("The task changed; nothing was written").task,
             ]);
         }
-        if let Some(range) = open.erase.clone().filter(|_| due.is_some()) {
+        match open.target {
+            Target::Editor {
+                line, text, erase, ..
+            } => self.write_editor_due(line, &text, erase, due, focus),
+            Target::Row(target, _) => {
+                let what = super::task_rows::What::Due(due);
+                let written = self.write_view_row(&target, None, Change::SetDue(due), what);
+                Task::batch([focus, written.gateway.task])
+            }
+        }
+    }
+
+    /// [`App::write_due`] to the task whose box is on line `line` of the
+    /// editor's text, which read `text` when the calendar opened.
+    fn write_editor_due(
+        &mut self,
+        line: usize,
+        text: &str,
+        erase: Option<std::ops::Range<usize>>,
+        due: Option<Date>,
+        focus: Task<Message>,
+    ) -> Task<Message> {
+        if let Some(range) = erase.filter(|_| due.is_some()) {
             let change = Change::Compound(vec![
                 task::suggest::erase(range.clone()),
                 Change::SetDue(due),
             ]);
-            let written = self.write_completion(open.line, &open.text, &range, &change);
+            let written = self.write_completion(line, text, &range, &change);
             return Task::batch([focus, written]);
         }
         let started = std::time::Instant::now();
         let change = Change::SetDue(due);
         let edit = self.editor.plan_markdown(|lines, selection, options| {
-            task::edit(lines, open.line, selection, &change, options)
+            task::edit(lines, line, selection, &change, options)
         });
-        let Some(edit) = edit.filter(|edit| edit.line == open.line) else {
+        let Some(edit) = edit.filter(|edit| edit.line == line) else {
             return Task::batch([focus, self.blocked("Put the caret on a task line").task]);
         };
         // The caret and the selection where the line edit moved them,
@@ -615,7 +710,7 @@ impl App {
                     if let Some(replaced) = replaced {
                         let after = self.editor.cursor();
                         let inside = |at: iced::widget::text_editor::Position| {
-                            at.line == open.line
+                            at.line == line
                                 && replaced.start < at.column
                                 && at.column < replaced.end
                         };
@@ -647,15 +742,31 @@ impl App {
     }
 
     /// Whether what the calendar was opened for has gone: the note, its
-    /// text, or the way it is shown.
+    /// text, or the way it is shown; for a row, the task view. A row's
+    /// task that changed is the write's to refuse.
     fn calendar_stale(&self, open: &Open) -> bool {
-        !self.preferences.tasks
-            || self.loading.is_some()
-            || self.editor.backend() != wren_editor::BackendKind::Owned
-            || !self.markdown_in_editor()
-            || self.selected_note != open.note
-            || self.editor.revision() != open.revision
-            || self.editor.line_text(open.line).as_deref() != Some(open.text.as_str())
+        match &open.target {
+            Target::Editor {
+                note,
+                revision,
+                line,
+                text,
+                ..
+            } => {
+                !self.preferences.tasks
+                    || self.loading.is_some()
+                    || self.editor.backend() != wren_editor::BackendKind::Owned
+                    || !self.markdown_in_editor()
+                    || self.selected_note != *note
+                    || self.editor.revision() != *revision
+                    || self.editor.line_text(*line).as_deref() != Some(text.as_str())
+            }
+            Target::Row(..) => {
+                !self.preferences.tasks
+                    || self.loading.is_some()
+                    || self.surface() != Surface::Tasks
+            }
+        }
     }
 
     /// Close the calendar once what it was opened for has gone, or the
@@ -669,7 +780,11 @@ impl App {
         open.model.set_today(today);
         let taken = self.palette.is_some() || self.dialog.is_some();
         let open = self.calendar.as_ref().expect("open");
-        if !taken && !self.calendar_stale(open) && self.editor.first_visible_line() == open.top {
+        let scrolled = match &open.target {
+            Target::Editor { top, .. } => self.editor.first_visible_line() != *top,
+            Target::Row(..) => false,
+        };
+        if !taken && !self.calendar_stale(open) && !scrolled {
             return Task::none();
         }
         self.take_calendar();
@@ -700,6 +815,10 @@ impl App {
         }
         let open = self.calendar.as_ref().zip(self.calendar_bounds());
         let Some((open, card)) = open else {
+            // The task view's menu takes the same two layers.
+            if let Some((scrim, menu)) = self.task_menu_layers() {
+                return stack![base, scrim, menu].into();
+            }
             return stack![base, iced::widget::Space::new(), iced::widget::Space::new()].into();
         };
         let at = card.position();
@@ -716,17 +835,22 @@ impl App {
 
     /// Where the open calendar's card is in the window: placed from its
     /// anchor as the editor last laid it out, or where it was when the
-    /// calendar opened.
+    /// calendar opened; for a row, from the row's due cell.
     pub(super) fn calendar_bounds(&self) -> Option<Rectangle> {
         let open = self.calendar.as_ref()?;
-        let anchor = self
-            .editor
-            .anchor_bounds(&open.anchor)
-            .or(open.opened_at)
-            .unwrap_or(Rectangle::new(
-                Point::new((self.viewport.width - WIDTH) / 2.0, 96.0),
-                Size::ZERO,
-            ));
+        let anchor = match &open.target {
+            Target::Editor {
+                anchor, opened_at, ..
+            } => self
+                .editor
+                .anchor_bounds(anchor)
+                .or(*opened_at)
+                .unwrap_or(Rectangle::new(
+                    Point::new((self.viewport.width - WIDTH) / 2.0, 96.0),
+                    Size::ZERO,
+                )),
+            Target::Row(_, at) => *at,
+        };
         Some(Rectangle::new(
             place(anchor, self.viewport),
             Size::new(WIDTH, HEIGHT),
@@ -1867,7 +1991,7 @@ mod tests {
     }
 
     /// Another note in the editor gives back the lines kept of the one
-    /// before, and the owners' copy of it.
+    /// before, and the task index's copy of its draft.
     #[test]
     fn another_note_gives_back_what_was_kept() {
         let (_directory, mut app) = note_app("advanced", "on", NOTE);
@@ -1880,16 +2004,18 @@ mod tests {
                 Edit::Insert(c),
             ))));
         }
+        let holds_draft =
+            |app: &App| (app.session.as_ref().unwrap().tasks().unwrap()).holds_draft();
         assert!(app.task_lines_kept());
-        assert!(app.owners.holds_typing());
+        assert!(holds_draft(&app));
         let other = first_note(&app, "B Other");
         let _ = app.process_core(Op::OpenNote { note: Some(other) });
         app.release_task_caches();
         assert!(!app.task_lines_kept());
-        assert!(!app.owners.holds_typing());
+        assert!(!holds_draft(&app));
         // A message reads only the note shown now.
         let _ = app.update(Message::Tick);
-        assert!(!app.owners.holds_typing());
+        assert!(!holds_draft(&app));
     }
 
     /// Typing at the end of a 20,000-line note reads a bounded number of

@@ -13,6 +13,41 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **The task summary view.** With tasks on, a count in each column's header
+  (open and doing tasks, red while one is overdue) and **Show tasks**
+  (⇧⌘T, Mod+Shift+T on Linux) open the tasks of a workspace, section, group
+  or note in the editor pane. Filter by status, owner (Me, or a name),
+  due date and priority, group by note, due date, priority or owner, and
+  hide done work older than 14 days; the filters are remembered for each
+  scope. Space, ⌘↵ (Mod+Enter), a click on the box, menus, the calendar, the task form
+  and a rename of the description (F2) change the task in its note, open or
+  closed, with a message and Undo (⌘Z / Mod+Z); rows stay where they are
+  until you refresh, change a filter or scope, or leave the view. See
+  [Tasks](https://charliek.github.io/wren/reference/tasks/#the-summary-view).
+- **Hide tasks** from the summaries: **Hide tasks in this note** writes
+  `tasks: off` into its front matter (Obsidian's `TP_ignore_this_file: true`
+  is honoured too), and **Hide tasks from this group** keeps the group in
+  `.wren/tasks.toml`. Hidden notes and groups are marked, and the view says
+  what it left out.
+- `.wren/tasks.toml`, Wren's own file for the hidden groups and each view's
+  filters. It is created only when something is set, and never with
+  `tasks = off`.
+- Settings `tasks-me` (the owners who count as Me) and `task-counts` (the
+  header counts, also **Toggle task counts** in the palette).
+
+### Fixed
+
+- Fixed some races where a workspace scan that finishes late undid recent
+  changes, in search as well as tasks: a failed scan keeps the open and
+  just-changed notes, a result that omits a changed note that still exists is
+  dropped and rescanned, the open note found deleted is removed, and a failed
+  open reads the note again. A note recreated just after a failed open can
+  show no content in search until the next poll, about a second.
+- A write to a closed note that finds bytes that are not text now refuses, and
+  drops the note's old tasks and search text until it reads again.
+
 ## v0.2.2 — 2026-11-26
 
 ### Changed

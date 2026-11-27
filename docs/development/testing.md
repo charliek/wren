@@ -303,7 +303,7 @@ checked absent on classic, and with tasks off.
 
 | File | What it covers |
 |---|---|
-| `test_tasks_gate.py` | Tasks off: no task command or key, every `tasks.*` request but `tasks.get` refused (it answers `{"tasks": false}`), and the pinned date reaching the app with tasks on. |
+| `test_tasks_gate.py` | Tasks off: no task command or key, every `tasks.*` request refused, or answering `{"tasks": false}` for the plain `tasks.get`, `tasks.view`, `tasks.entry` and the view's `write`, `hide` and `undo`, and the pinned date reaching the app with tasks on. |
 | `test_tasks_baseline.py` | The baseline note with tasks off: Enter, Backspace, toggle, highlighting, previews and spelling as before the feature. `make check` pins the same note in `crates/wren-iced/golden/tasks-baseline.txt`. |
 | `test_tasks_emoji.py` | The task glyphs: caret steps, one-press Backspace, selection and hit-testing. |
 | `test_tasks_status.py` | The statuses of the box, and the toggle's stamps. |
@@ -314,9 +314,15 @@ checked absent on classic, and with tasks off.
 | `test_tasks_calendar.py` | The calendar. |
 | `test_tasks_suggest.py` | Suggestions, including a native X11 case that types `du` and Enter at xdotool speed. |
 | `test_tasks_form.py` | The task form. |
+| `test_tasks_write.py` | Writing a task from outside the editor: `tasks.view`'s `write`, `hide` and `undo` on an open and a closed note, an out-of-date row, and the front matter cases. |
+| `test_tasks_view.py` | The view's surface: opening it, Back and Forward through it, the note under it untouched, and the state file unchanged. |
+| `test_tasks_entry.py` | The ways in: the header counts (on and off), Show tasks from each column, the editor and a board, a row's actions, the hides and their marks, and the message with Undo. |
+| `test_tasks_view_list.py` | The list: filters, grouping, order, the footer, the keys, the menus, and the filters remembered in `.wren/tasks.toml` across a restart. Its workspace is `fixtures/tasks/list/`. |
+| `test_tasks_view_write.py` | Writes from a row: keys, clicks and menus, the message and its Undo, and rows held until `r`. |
 
-`tasks.get` reports the task state and is the one request that answers with
-tasks off (`{"tasks": false}`). With them on it gives `today`, the date the
+`tasks.get` reports the task state, and with tasks off it, like plain
+`tasks.view`, plain `tasks.entry` and the view's `write`, `hide` and `undo`,
+answers `{"tasks": false}`. With them on it gives `today`, the date the
 app last `seen` and how many times the day has changed (`day_changes`), the
 `engine`, the caret's `line` (its number, its text and its task: the box's
 byte range, symbol, status name and type, or `null`), its `tokens` (each
@@ -326,7 +332,7 @@ overdue and its pieces). `tasks.set_today` `{"date": "YYYY-MM-DD"}` moves
 the clock as midnight would, so the colours, the footer and the calendar
 refresh. `tasks.owners` returns the owners suggestions would offer, each
 with its note count, and whether the list is current for the workspace.
-Every `tasks.*` request but `tasks.get` is refused with tasks off.
+Any other `tasks.*` request is refused with tasks off.
 
 `editor.open_menu`, `editor.click`, `editor.bounds` and `editor.right_click`
 drive the popovers and clicks; `editor.cursor` places the caret.
@@ -405,6 +411,48 @@ calendar over the form `{"day": …}`, `{"chip": …}` or `{"calendar": …}`
 the fields `task-form-description`, `task-form-due` and
 `task-form-owners`.
 
+The task summary view (`tools/wrentest/test_tasks_view*.py`) is driven by
+`tasks.view`. With no parameters it reports `{"tasks", "open", "scope",
+"path", "label", "keys"}`: whether the view is open, its scope, and whether
+it has the keyboard (`{"tasks": false}` with tasks off). `{"open": {"scope":
+"workspace" | "section" | "group" | "note", "path": …}}` opens a view as
+any entry point does, and answers with the action's `disposition` and
+`warning`. `{"key": {"key": …, "mods": […]}}` presses a key while the view
+has the keyboard, as its key wrapper and then the app hear it, and
+`{"click": …}` clicks a control, or with `{"click": {"cell": {"row": 0,
+"cell": "box" | "priority" | "due"}}}` a cell of a row, `{"click": {"right":
+0}}` right-clicks a row, `{"click": {"menu": "Done"}}` presses a row of the
+menu over the view (rows count from zero), `{"click": {"describe": 0}}`
+double-clicks a row's description to edit it (as `{"key": {"key": "f2"}}`
+does on the selected row), `{"type": text}` sets the open field's text as a
+paste or an input method's commit does, and with
+`{"list": true}` the answer adds the list's state: its filters, chips,
+groups, rows (with whether each is held in place), counts, focus, open menu,
+and where the controls were drawn. `{"write": {"path": "Work/A.md", "line":
+0, "change": "toggle"}}` (`line` counts from zero; `expect` optionally names
+the line a stale row holds), `{"hide": {"path", "hidden"}}` and `{"undo":
+true}` call the functions the keys and menus call, and answer with the
+`write` or `switch` made, `refused` (`{"message", "refresh"}` when nothing
+was written, `null` for a write that changed nothing), the index's `note`,
+`can_undo`, and the action's `disposition` and `warning`. Under a view every
+`board.*` request but `board.get` is refused, and so is `editor.focus`, and
+a key is refused while the view has no keyboard. `navigation.get` reports
+the pane as `surface` (`text`, `board`, `raw` or `tasks`), and its
+`can_back` and `can_forward` count views.
+
+`tasks.entry` reports the ways in: with no parameters `{"tasks", "counts",
+"headers", "marks", "scope", "notice"}`, whether the headers count, each
+column's count (its `scope`, `path`, `open_and_doing`, `overdue`, `pressed`
+and `label`), the paths of the notes and groups that carry a mark, the scope
+`tasks.show` would open now, and the message showing with its `text`,
+`code` and whether it has `undo`. `{"click": column}` clicks a column's
+count, `{"undo": true}` presses the message's Undo and `{"dismiss": true}`
+dismisses it. With tasks off every action is refused.
+
+`make perf-tasks` times the task index on `make perf-search`'s workload, in
+release: the full build, one note's update, a keystroke and the three header
+counts.
+
 ## Looking at real screens
 
 Build with `--features smoke-test`, then run `tools/capture_scenes.py`
@@ -429,12 +477,19 @@ ICED_BACKEND=tiny-skia python3 tools/run_display.py x11 -- \
   --setting editor-line-height=2 --label tall --only markdown
 ```
 
-`--only tasks` (task lines, colours, the line commands, the status bar, the menus, the calendar and the suggestions) opens the tasks fixture workspace with `tasks = on` and today
+`--only tasks` (task lines, colours, the line commands, the status bar, the menus, the calendar, the suggestions, the form and the ways into the task view) opens the tasks fixture workspace with `tasks = on` and today
 pinned to 19 November 2026, on the advanced engine unless `--engine` says
 otherwise, and shoots task lines, colours, the line commands, the status bar
 and the menus into `target/scenes/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`;
 `--fonts` names the emoji font setup in that path. Check them in three
 themes on both engines after changing task colours or the status bar.
+
+`--only task-list` opens `fixtures/tasks/list/` (two groups, with
+`tasks-me = sam, sam.lee`) the same way and shoots the summary view of the
+workspace's tasks: all of them, narrowed by a status chip, grouped by due
+date and by owner, an empty list with its hint, and the scope menu; then a
+row's menus, the calendar and the form over it, the message with Undo, and
+a row held in place. The PNGs go where `--only tasks` writes them.
 
 `--only spell`, which needs `--engine advanced`, turns spell check on and
 shoots the acceptance note: `spell-marks` (its marks, with the caret
@@ -485,8 +540,9 @@ for r in tiny-skia wgpu; do for t in dark light; do
 done; done
 ```
 
-`--window 1024x640` (X11 only) resizes the window before the board scenes,
-to see them at the size of a smaller screen; give it a `--label` too.
+`--window 1024x640` (X11 only) resizes the window before the board scenes
+or the `--only task-list` scenes, to see them at the size of a smaller
+screen; give it a `--label` too.
 
 To try boards by hand without touching your own settings, copy the sample
 workspace and give Wren a throwaway config directory, in a target directory

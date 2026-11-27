@@ -22,11 +22,24 @@ menu with no suggestions, and the menu above a word on the last visible row.
 to 19 November 2026, shoots its task lines, the task colours (with a caret,
 a selection, and two days later), the emoji spike's note (with a caret
 and a selection on its glyphs), the line commands, the status bar and, on
-the advanced engine, the task, status, priority and spelling menus, and
+the advanced engine, the task, status, priority and spelling menus, then
+the task view and its ways in (the header counts, a row's task actions,
+the hidden marks and the message with Undo), and
 writes to
 `<out>/tasks/<engine>-<renderer>-<display>-<fonts>/<theme>/`, the setup a task
 scene depends on; `--fonts` names the font setup instead of the check for Noto
 Color Emoji.
+`--only task-list` opens the summary view's fixture
+(`tools/wrentest/fixtures/tasks/list/`, two groups, with `tasks-me = sam,
+sam.lee`) on the advanced engine with `tasks = on` and the same pinned day,
+and shoots the view of the workspace's tasks: all of them, narrowed by a
+status chip, grouped by due date and by owner, an empty list with its hint,
+and the scope menu open; then a row's writes (item 10.4): its status,
+priority and task menus, the calendar and the form over it, the message
+with Undo after a write, and a row held in place under the Open chip after
+it was marked done, and a row's description edited in place (item 10.5),
+its field open with text typed; the PNGs go where `--only tasks` writes
+them. `--window 1024x640` (X11 only) shoots them in a window that size.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -325,6 +338,10 @@ def spell_scenes(client, shot_here) -> None:
 
 
 TASKS_FIXTURE = Path(__file__).resolve().parent / "wrentest" / "fixtures" / "tasks" / "workspace"
+# The summary view's fixture (item 10.3): two groups, `tasks-me` names, a
+# task with two owners, finished work with and without stamps.
+TASK_LIST_FIXTURE = TASKS_FIXTURE.parent / "list"
+TASK_LIST_SETTINGS = "tasks-me = sam, sam.lee\n"
 # Every task scene pins the design page's day, a Thursday.
 TASKS_TODAY = "2026-11-19"
 
@@ -387,6 +404,182 @@ def task_scenes(client, shot_here, engine: str, resize) -> None:
         menu_scenes(client, shot_here, resize)
         calendar_scenes(client, shot_here, resize)
         suggestion_scenes(client, shot_here)
+    view_scenes(client, shot_here)
+    entry_scenes(client, shot_here)
+
+
+def entry_scenes(client, shot_here) -> None:
+    """The ways into the task view (discovery/tasks-build.md item 10.2),
+    from the Emoji group, whose tasks are all due later while the rest of
+    the workspace has overdue ones: the header counts (the Notes one not
+    red, the others red) and then hidden; a group's actions with the task
+    rows; the Footer group hidden, with its mark and the message with Undo;
+    and the open note's tasks hidden, with its "tasks off" mark. Each is
+    undone, so the workspace is left as it was."""
+    open_note(client, "Emoji spike.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Emoji"),
+             timeout=10, description="the emoji note opens")
+    client.call("editor.focus")
+    headers = client.call("tasks.entry")["headers"]
+    assert headers["notes"]["overdue"] == 0 and headers["sections"]["overdue"] > 0, headers
+    shot_here("entry-counts")
+    client.call("command.run", {"id": "view.toggle_task_counts"})
+    client.call("tasks.entry", {"dismiss": True})
+    assert client.call("tasks.entry")["counts"] is False
+    shot_here("entry-counts-off")
+    client.call("command.run", {"id": "view.toggle_task_counts"})
+    client.call("tasks.entry", {"dismiss": True})
+    groups = {row["path"]: row["id"] for row in client.call("session.get")["groups"]}
+    client.call("palette.open", {"mode": "item_actions",
+                                 "target": {"group": groups["Tasks/Footer"]}})
+    shot_here("entry-group-actions")
+    rows = client.call("navigation.get")["modal"]["results"]
+    hide = next(index for index, row in enumerate(rows)
+                if row["key"]["item_action"]["command"] == "group.hide_tasks")
+    client.call("palette.activate", {"index": hide})
+    state = client.call("tasks.entry")
+    assert state["marks"]["groups"] == ["Tasks/Footer"] and state["notice"]["undo"], state
+    shot_here("entry-group-hidden")
+    client.call("tasks.entry", {"undo": True})
+    notes = {row["path"]: row["id"] for row in client.call("session.get")["notes"]}
+    emoji = "Tasks/Emoji/Emoji spike.md"
+    client.call("palette.open", {"mode": "item_actions", "target": {"note": notes[emoji]}})
+    rows = client.call("navigation.get")["modal"]["results"]
+    hide = next(index for index, row in enumerate(rows)
+                if row["key"]["item_action"]["command"] == "note.hide_tasks")
+    client.call("palette.activate", {"index": hide})
+    state = client.call("tasks.entry")
+    assert state["marks"]["notes"] == [emoji] and state["notice"]["undo"], state
+    shot_here("entry-note-hidden")
+    client.call("tasks.entry", {"undo": True})
+    assert client.call("tasks.entry")["marks"] == {"groups": [], "notes": []}
+
+
+def view_scenes(client, shot_here) -> None:
+    """The task view's surface (discovery/tasks-build.md item 10.1): the
+    view of a group in the editor pane, over the note it was opened from,
+    with Back lit in its header; then the view of the whole workspace,
+    opened from the first. Back twice returns to the note."""
+    open_note(client, "Task lines.md")
+    wait_for(lambda: client.call("editor.get")["text"].startswith("# Task lines"),
+             timeout=10, description="the task lines note opens")
+    state = client.call("tasks.view", {"open": {"scope": "group", "path": "Tasks/Baseline"}})
+    assert state["open"] and (state["scope"], state["label"]) == ("group", "Baseline"), state
+    assert state["keys"] and client.call("navigation.get")["can_back"], state
+    shot_here("task-view")
+    state = client.call("tasks.view", {"open": {"scope": "workspace"}})
+    assert state["open"] and state["scope"] == "workspace", state
+    shot_here("task-view-workspace")
+    for _ in range(2):
+        client.call("command.run", {"id": "navigation.back"})
+    assert not client.call("tasks.view")["open"]
+    assert client.call("navigation.get")["surface"] == "text"
+
+
+def task_list_scenes(client, shot_here) -> None:
+    """The summary view's list (discovery/tasks-build.md item 10.3), of
+    the whole workspace: every task, then narrowed by the Doing chip,
+    grouped by due date, grouped by owner (Me first, a task with two owners
+    under each), an empty list with the hint that says how to widen it, and
+    the scope menu ("Show tasks in") open under its chip. Each filter is
+    put back after its scene, so `.wren/tasks.toml` ends with no view."""
+    def view(**params):
+        return client.call("tasks.view", {**params, "list": True})
+
+    def click(**target):
+        return view(click=target)["list"]
+
+    state = view(open={"scope": "workspace"})
+    assert state["open"] and state["keys"], state
+    assert len(state["list"]["rows"]) == 12, state["list"]
+    shot_here("task-list")
+    click(control="chip:doing")
+    assert [row["status"] for row in view()["list"]["rows"]] == ["doing"]
+    shot_here("task-list-narrowed")
+    click(control="chip:doing")
+    for group, row in (("due", "Due date"), ("owner", "Owner")):
+        click(control="group")
+        assert view()["list"]["menu"]["for"] == "group"
+        click(menu=row)
+        assert view()["list"]["filters"]["group"] == group
+        shot_here(f"task-list-by-{group}")
+    click(control="group")
+    click(menu="Note")
+    click(control="priority")
+    click(menu="Lowest")
+    click(control="chip:done")
+    state = view()["list"]
+    assert not state["rows"] and state["empty"], state
+    shot_here("task-list-empty")
+    click(control="chip:done")
+    click(control="priority")
+    click(menu="Any priority")
+    click(control="scope")
+    menu = view()["list"]["menu"]
+    assert menu["for"] == "scope" and menu["title"] == "Show tasks in", menu
+    shot_here("task-list-scope-menu")
+    view(key={"key": "escape", "mods": []})
+    assert view()["list"]["menu"] is None
+    assert view()["list"]["filters"] == {"statuses": [], "owner": "anyone", "group": "note",
+                                          "hide_old": True, "due": None, "priority": None}
+
+
+def task_write_scenes(client, shot_here) -> None:
+    """Writes from the summary view (discovery/tasks-build.md item 10.4), on
+    the first open row with a due date: its status menu (S), priority menu
+    (P) and task menu (a right-click) under its cells, the calendar (D) and
+    the task form (E) over it, the message with Undo after Space marks it
+    done, and that row held where it stood with the Open chip pressed."""
+    def view(**params):
+        return client.call("tasks.view", {**params, "list": True})["list"]
+
+    def press(key: str):
+        return view(key={"key": key, "mods": []})
+
+    state = view(open={"scope": "workspace"})
+    row = next(index for index, each in enumerate(state["rows"])
+               if each["status"] == "open" and each["due"] and not each["overdue"])
+    view(click={"row": row})
+    for key, menu, name in (("s", "row_status", "status"), ("p", "row_priority", "priority")):
+        assert press(key)["menu"]["for"] == menu
+        shot_here(f"task-row-{name}-menu")
+        assert press("escape")["menu"] is None
+    assert view(click={"right": row})["menu"]["for"] == "row_task"
+    shot_here("task-row-task-menu")
+    press("escape")
+    press("d")
+    assert client.call("tasks.calendar")["open"]
+    shot_here("task-row-calendar")
+    client.call("tasks.calendar_click", {"target": "outside"})
+    press("e")
+    assert client.call("tasks.form")["open"]
+    shot_here("task-row-form")
+    client.call("tasks.form_click", {"target": "cancel"})
+    press("space")
+    assert client.call("tasks.entry")["notice"]["undo"]
+    shot_here("task-row-message")
+    client.call("tasks.entry", {"undo": True})
+    # Another filter lets held rows go: the chip first, then the write.
+    state = view(click={"control": "chip:open"})
+    description = next(each["description"] for each in view()["rows"] if each["selected"])
+    row = next(index for index, each in enumerate(state["rows"])
+               if each["description"] == description)
+    view(click={"row": row})
+    state = press("space")
+    assert state["rows"][row]["held"] and state["rows"][row]["status"] == "done", state["rows"]
+    shot_here("task-row-held")
+    client.call("tasks.entry", {"undo": True})
+    press("r")
+    view(click={"control": "chip:open"})
+    # The description edited in place: F2 on the row, text typed.
+    state = view()
+    row = next(index for index, each in enumerate(state["rows"]) if each["status"] == "open")
+    view(click={"row": row})
+    assert press("f2")["describe"]["row"] == row
+    text = view()["describe"]["text"]
+    view(type=f"{text} before lunch")
+    shot_here("task-row-describe")
+    assert press("escape")["describe"] is None
 
 
 def suggestion_scenes(client, shot_here) -> None:
@@ -658,7 +851,9 @@ def command_scenes(client, shot_here) -> None:
     client.call("editor.focus")
     client.call("palette.open", {"mode": "commands"})
     rows = client.call("palette.query", {"query": "task"})["navigation"]["modal"]["results"]
-    tasks = [row for row in rows if row["group"] == "Tasks"]
+    # The line commands: Show tasks (item 10.2) is the app's.
+    tasks = [row for row in rows
+             if row["group"] == "Tasks" and row["key"]["command"] != "tasks.show"]
     # The status and priority menus (item 3.4) and the calendar (item 4.1)
     # are the advanced engine's.
     menus = {"task.set_status", "task.set_priority", "task.set_due"}
@@ -1523,24 +1718,24 @@ def main() -> int:
     parser.add_argument("--setting", action="append", default=[], metavar="KEY=VALUE",
                         help="another config.conf line; repeatable")
     parser.add_argument("--label", help="a directory level for these settings")
-    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks"),
+    parser.add_argument("--only", choices=("markdown", "spell", "boards", "tasks", "task-list"),
                         help="shoot only these scenes")
     parser.add_argument("--fonts", metavar="LABEL",
                         help="with --only tasks, name the font setup in the output path "
                              "(default: whether Noto Color Emoji is installed)")
     parser.add_argument("--window", metavar="WIDTHxHEIGHT",
-                        help="with --only boards, resize the window first (X11 only); "
-                             "pair it with --label")
+                        help="with --only boards or task-list, resize the window first "
+                             "(X11 only); pair it with --label")
     args = parser.parse_args()
     if args.engine is None:
-        args.engine = "advanced" if args.only == "tasks" else "classic"
-    if args.fonts and args.only != "tasks":
+        args.engine = "advanced" if args.only in ("tasks", "task-list") else "classic"
+    if args.fonts and args.only not in ("tasks", "task-list"):
         parser.error("--fonts goes with --only tasks")
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
-    if args.window and (args.only != "boards" or sys.platform == "darwin"
+    if args.window and (args.only not in ("boards", "task-list") or sys.platform == "darwin"
                         or "x" not in args.window):
-        parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
+        parser.error("--window takes WIDTHxHEIGHT, with --only boards or task-list, on X11")
     settings = f"editor-engine = {args.engine}\n"
     for setting in args.setting:
         key, separator, value = setting.partition("=")
@@ -1549,7 +1744,7 @@ def main() -> int:
         settings += f"{key.strip()} = {value.strip()}\n"
     # A `--setting editor-engine=…` comes later in the file, so it wins.
     engine = last_value(settings, "editor-engine")
-    if args.only == "tasks":
+    if args.only in ("tasks", "task-list"):
         out = tasks_out(args.out, engine, args.fonts)
     else:
         out = args.out if engine == "classic" else args.out / engine
@@ -1613,6 +1808,25 @@ def main() -> int:
 
                 task_scenes(app.client, shot_tasks, engine,
                             lambda size: window_size(app, size))
+            return 0
+        if args.only == "task-list":
+            workspace = Path(temp).resolve() / "list"
+            shutil.copytree(TASK_LIST_FIXTURE, workspace)
+            with WrenApp(workspace=workspace, evaluation=False,
+                         settings=settings + "tasks = on\n" + TASK_LIST_SETTINGS,
+                         today=TASKS_TODAY) as app:
+                if args.window:
+                    window_size(app, args.window)
+                app.client.call("theme.set", {"id": args.theme})
+                wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
+                banner = app.client.call("session.get")["banner"]
+                assert banner is None, banner
+
+                def shot_list(name: str) -> None:
+                    shot(app.client, name)
+
+                task_list_scenes(app.client, shot_list)
+                task_write_scenes(app.client, shot_list)
             return 0
         if args.only == "spell":
             workspace = Path(temp).resolve() / "work"

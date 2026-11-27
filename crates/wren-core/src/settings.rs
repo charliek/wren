@@ -181,6 +181,13 @@ pub struct Settings {
     /// Whether typing on a task line offers dates, priorities and owners,
     /// with `tasks` on.
     pub tasks_suggest: bool,
+    /// The owners who count as Me in a task view, besides tasks with no
+    /// owner: each name without its `@`, case folded as owners compare
+    /// ([`wren_markdown::task::fold_name`]), in the order written.
+    pub tasks_me: Vec<String>,
+    /// Whether each column's header counts the open and doing tasks of
+    /// what the column belongs to, with `tasks` on.
+    pub task_counts: bool,
     /// When the tool dock's buttons show their keys.
     pub board_key_badges: KeyBadges,
     /// Linux's command key, the `mod` of the keymap. Parsed everywhere and
@@ -209,6 +216,8 @@ impl Default for Settings {
             board_key_badges: KeyBadges::Hold,
             tasks: true,
             tasks_suggest: true,
+            tasks_me: Vec::new(),
+            task_counts: true,
             linux_modifier: LinuxModifier::default(),
             keybinds: Vec::new(),
             warnings: Vec::new(),
@@ -230,6 +239,28 @@ fn unquote(value: &str) -> &str {
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
         .unwrap_or(value)
+}
+
+/// The owner names of `tasks-me`: separated by commas, each with or
+/// without its `@`, case folded and without repeats. An empty value names
+/// no one; a name with a space in it, or an `@` alone, is no name.
+fn parse_names(value: &str) -> Option<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    for name in value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let name = name.strip_prefix('@').unwrap_or(name);
+        if name.is_empty() || name.contains(char::is_whitespace) || name.contains('@') {
+            return None;
+        }
+        let folded = wren_markdown::task::fold_name(name);
+        if !names.contains(&folded) {
+            names.push(folded);
+        }
+    }
+    Some(names)
 }
 
 /// Split a line into `(key, value)`, or `None` for blanks and comments.
@@ -330,6 +361,14 @@ impl Settings {
                 },
                 "tasks-suggest" => match parse_bool(value) {
                     Some(enabled) => settings.tasks_suggest = enabled,
+                    None => invalid(),
+                },
+                "tasks-me" => match parse_names(value) {
+                    Some(names) => settings.tasks_me = names,
+                    None => invalid(),
+                },
+                "task-counts" => match parse_bool(value) {
+                    Some(enabled) => settings.task_counts = enabled,
                     None => invalid(),
                 },
                 "linux-modifier" => match LinuxModifier::parse(value) {
@@ -606,6 +645,15 @@ pub const TEMPLATE: &str = "\
 # tasks = on and editor-engine = advanced.
 # tasks-suggest = on
 
+# Me in the task views: the owners who count as you, besides tasks with no
+# owner. Names without the @, separated by commas; case does not matter.
+# tasks-me = sam, sam.lee
+
+# Task counts: each column's header counts the open and doing tasks of the
+# workspace, the section or the group it shows, red when one is overdue; a
+# click shows them. It needs tasks = on.
+# task-counts = on
+
 # The command key on Linux: ctrl, as other apps use, or alt, the way Cmd
 # works on macOS (Ctrl then still undoes, copies, pastes, finds and quits).
 # Ignored on macOS.
@@ -847,6 +895,40 @@ mod tests {
     }
 
     #[test]
+    fn tasks_me_names_folded_owners_and_warns_on_bad_names() {
+        assert!(Settings::default().tasks_me.is_empty());
+        assert!(Settings::parse("").tasks_me.is_empty());
+        assert!(Settings::parse(TEMPLATE).tasks_me.is_empty());
+        assert!(TEMPLATE.contains("\n# tasks-me = sam, sam.lee\n"));
+        for (value, names) in [
+            ("sam", vec!["sam"]),
+            ("Sam, @Sam.Lee", vec!["sam", "sam.lee"]),
+            ("  @SAM ,sam,, ", vec!["sam"]),
+            ("\"ÉMILE\"", vec!["émile"]),
+            ("", vec![]),
+        ] {
+            let settings = Settings::parse(&format!("tasks-me = {value}\n"));
+            assert_eq!(settings.tasks_me, names, "{value:?}");
+            assert!(settings.warnings.is_empty(), "{value:?}");
+        }
+        // A later line replaces an earlier one.
+        let settings = Settings::parse("tasks-me = sam\ntasks-me = priya\n");
+        assert_eq!(settings.tasks_me, ["priya"]);
+        for bad in ["sam lee", "@", "sam, @", "a@b"] {
+            let settings = Settings::parse(&format!("tasks-me = sam\ntasks-me = {bad}\n"));
+            assert_eq!(
+                settings.tasks_me,
+                ["sam"],
+                "{bad:?} keeps the earlier value"
+            );
+            assert_eq!(settings.warnings.len(), 1, "{bad:?}");
+            assert!(settings.warnings[0].contains("line 2: invalid tasks-me value"));
+        }
+        let set = with_value(TEMPLATE, "tasks-me", "Sam, priya");
+        assert_eq!(Settings::parse(&set).tasks_me, ["sam", "priya"]);
+    }
+
+    #[test]
     fn tasks_default_on_and_parse_booleans() {
         assert!(Settings::default().tasks);
         assert!(Settings::parse("").tasks);
@@ -901,6 +983,30 @@ mod tests {
         let off = with_value(TEMPLATE, "tasks-suggest", "off");
         assert!(!Settings::parse(&off).tasks_suggest);
         assert!(Settings::parse(&off).tasks == Settings::parse(TEMPLATE).tasks);
+    }
+
+    #[test]
+    fn task_counts_default_on_and_parse_booleans() {
+        assert!(Settings::default().task_counts);
+        assert!(Settings::parse("").task_counts);
+        assert!(Settings::parse(TEMPLATE).task_counts);
+        for (value, enabled) in [("on", true), ("true", true), ("off", false), ("no", false)] {
+            let settings = Settings::parse(&format!("task-counts = {value}\n"));
+            assert_eq!(settings.task_counts, enabled, "{value}");
+            assert!(settings.warnings.is_empty(), "{value}");
+            assert!(settings.tasks, "{value}");
+        }
+        let settings = Settings::parse("task-counts = off\ntask-counts = some\n");
+        assert!(!settings.task_counts, "a bad value keeps the earlier one");
+        assert!(settings.warnings[0].contains("line 2: invalid task-counts value"));
+        assert!(TEMPLATE.contains("\n# task-counts = on\n"));
+        // The palette's toggle writes the line after the commented one.
+        let off = with_value(TEMPLATE, "task-counts", "off");
+        assert!(off.contains("\n# task-counts = on\n") && off.ends_with("task-counts = off\n"));
+        assert!(!Settings::parse(&off).task_counts);
+        let on = with_value(&off, "task-counts", "on");
+        assert!(Settings::parse(&on).task_counts);
+        assert_eq!(on.matches("task-counts = on").count(), 2, "{on}");
     }
 
     #[test]

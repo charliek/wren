@@ -42,7 +42,8 @@
 //! plain Escape, drops its copy.
 //!
 //! **A close is a routing boundary.** A key that saves, cancels, presses a
-//! button or opens the calendar is the last input the form takes in its
+//! button or opens the calendar, or a message of the card's that opens it
+//! ([`FormKeys::stops_on`]), is the last input the form takes in its
 //! batch: the rest was typed before the user could see the form go, and is
 //! dropped, never typed and never claimed. A plain Escape among it is
 //! reported as [`FormKey::HeldEscape`], so the host's key handling drops
@@ -265,10 +266,15 @@ pub fn form_keys<'a, Message, Theme, Renderer>(
         chosen: Cell::new(false),
         save: None,
         claims: None,
+        stops_on: None,
         typed,
         on_key: Box::new(on_key),
     }
 }
+
+/// Whether a message of the card's ends the form's batch
+/// ([`FormKeys::stops_on`]).
+type Stops<'a, Message> = Box<dyn Fn(&Message) -> bool + 'a>;
 
 pub struct FormKeys<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
@@ -291,6 +297,7 @@ pub struct FormKeys<'a, Message, Theme, Renderer> {
     chosen: Cell<bool>,
     save: Option<SaveKeys>,
     claims: Option<&'static std::sync::atomic::AtomicUsize>,
+    stops_on: Option<Stops<'a, Message>>,
     typed: Rc<RefCell<String>>,
     on_key: Box<dyn Fn(FormKey) -> Message + 'a>,
 }
@@ -332,6 +339,14 @@ impl<'a, Message, Theme, Renderer> FormKeys<'a, Message, Theme, Renderer> {
     #[must_use]
     pub fn claims(mut self, claims: &'static std::sync::atomic::AtomicUsize) -> Self {
         self.claims = Some(claims);
+        self
+    }
+
+    /// A message of the card's for which `stops` is true (the calendar's
+    /// button) ends the form's batch, as [`FormKey::Calendar`] does.
+    #[must_use]
+    pub fn stops_on(mut self, stops: impl Fn(&Message) -> bool + 'a) -> Self {
+        self.stops_on = Some(Box::new(stops));
         self
     }
 
@@ -772,7 +787,12 @@ where
                 self.chosen.set(false);
                 self.suggestions.set(None);
             }
-            shell.merge(inner, std::convert::identity);
+            shell.merge(inner, |message| {
+                if self.stops_on.as_ref().is_some_and(|stops| stops(&message)) {
+                    self.stopped.set(true);
+                }
+                message
+            });
             // A press that gave a text input of the form the keyboard moves
             // the slot to it.
             let pressed = matches!(
@@ -1866,6 +1886,64 @@ mod tests {
         assert_eq!(messages, [key(FormKey::Suggest(1)), key(FormKey::Save)]);
         let messages = owners_batch(0, due, &[named(Named::Tab), named(Named::Enter)]);
         assert_eq!(messages, [key(FormKey::Focus(owners)), key(FormKey::Save)]);
+    }
+
+    /// A click on the card's calendar button, then Escape, in one batch:
+    /// the click hands the calendar the keyboard as Down in the due field
+    /// does ([`FormKeys::stops_on`]), so the Escape is no one's, where
+    /// without it the Escape would cancel the form.
+    #[test]
+    fn the_calendars_button_ends_the_forms_batch() {
+        for stops in [false, true] {
+            let content = column![
+                text_input("", "").id(IDS[0]),
+                text_input("", "").id(IDS[1]),
+                text_input("", "").id(IDS[2]),
+                button("📅").on_press(Out::Pressed),
+            ];
+            let keys = form_keys(
+                content,
+                slots(),
+                0,
+                Rc::new(RefCell::new(String::new())),
+                Out::Key,
+            );
+            let keys = if stops {
+                keys.stops_on(|out| *out == Out::Pressed)
+            } else {
+                keys
+            };
+            let mut element: Element<'static, Out, Theme, ()> = keys.into();
+            let mut tree = Tree::new(&element);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(Size::ZERO, Size::new(400.0, 400.0)),
+            );
+            let card = Layout::new(&node).children().next().unwrap();
+            let over = card.children().nth(3).unwrap().bounds().center();
+            let [press, release] = click();
+            let mut messages = Vec::new();
+            for event in [press, release, named(Named::Escape)] {
+                let mut shell = Shell::new(&mut messages);
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &event,
+                    Layout::new(&node),
+                    mouse::Cursor::Available(over),
+                    &(),
+                    &mut iced::advanced::clipboard::Null,
+                    &mut shell,
+                    &Rectangle::new(Point::ORIGIN, Size::new(400.0, 400.0)),
+                );
+            }
+            let escape = if stops {
+                FormKey::HeldEscape
+            } else {
+                FormKey::Escape
+            };
+            assert_eq!(messages, [Out::Pressed, key(escape)], "{stops}");
+        }
     }
 
     fn click() -> [Event; 2] {

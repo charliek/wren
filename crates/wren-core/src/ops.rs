@@ -4,13 +4,16 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::autosave::Autosave;
 use crate::fs_store::{DiskFile, Expected, Fault, FsStore, Leaf, RelPath, WriteReceipt};
-use crate::index::Index;
+use crate::index::{Index, Reread};
 use crate::kind::NoteKind;
 use crate::model::{
     self, Group, GroupId, ItemRef, Note, NoteId, Parent, Section, SectionId, Workspace,
 };
 use crate::reconcile::{self, ReconcileJob, ReconcileResult, Scanned, Tags};
 use crate::scan;
+use crate::task_write::{self, LineChange, Refused, SwitchChange};
+use crate::tasks::TaskIndex;
+use crate::tasks_file::{TaskFilters, TasksFile};
 use crate::watch::Watch;
 use crate::workspace_state::WorkspaceState;
 
@@ -85,6 +88,46 @@ pub enum Op {
     /// Merges a background scan from [`Session::take_reconcile_job`]. Results
     /// from another Session, an older job, or a since-changed tree are dropped.
     FinishReconcile(ReconcileResult),
+    /// Leave a section's or a group's tasks out of every rollup, or bring
+    /// them back: "Hide tasks from this group". Kept in `.wren/tasks.toml`;
+    /// refused while tasks are off.
+    SetTasksExcluded {
+        target: ItemRef,
+        excluded: bool,
+    },
+    /// Remember a task view's filters for its scope: the workspace
+    /// (`None`), a section, a group or a note. Kept in `.wren/tasks.toml`;
+    /// refused while tasks are off.
+    SetTaskFilters {
+        scope: Option<ItemRef>,
+        filters: TaskFilters,
+    },
+    /// Rewrite one task line of a Markdown note that is not open: the
+    /// line that read `expect` on line `line` when the task was listed,
+    /// found as [`task_write::locate`] finds it in the file as it is now.
+    /// The open document is settled first; the write is a compare-and-swap
+    /// on the bytes read, and makes no conflict copy. Once the line cannot
+    /// be found, or the file changed under the write, nothing is written,
+    /// the note is read again and the op fails with
+    /// [`task_write::CHANGED`]. The open note is refused: its editor is
+    /// its one writer, and a frontend applies [`task_write::plan_line`] to
+    /// that. Refused while tasks are off.
+    EditTaskLine {
+        note: NoteId,
+        line: usize,
+        expect: String,
+        change: LineChange,
+    },
+    /// "Hide tasks in this note": set or take away `tasks: off` in the
+    /// front matter of a Markdown note that is not open
+    /// ([`task_write::plan_switch`]), or put the front matter back as it
+    /// was. Settles, writes and refuses as [`Op::EditTaskLine`] does,
+    /// failing with [`task_write::SWITCH_CHANGED`] for front matter that
+    /// is not what a `Restore` expects.
+    EditTaskSwitch {
+        note: NoteId,
+        change: SwitchChange,
+    },
     Back,
     Forward,
 }
@@ -116,6 +159,47 @@ pub enum Event {
     },
     WorkspaceOpened,
     Warning(String),
+    /// [`Op::EditTaskLine`] wrote line `line` of a note that is not open:
+    /// it read `before` and reads `after` now, each without its ending.
+    /// Undoing it expects `after` there and writes `before`.
+    TaskLineWritten {
+        note: NoteId,
+        line: usize,
+        before: String,
+        after: String,
+    },
+    /// [`Op::EditTaskSwitch`] changed the front matter of a note that is
+    /// not open from `before` to `after`
+    /// ([`task_write::SwitchWrite`]). Undoing it expects `after` and
+    /// writes `before`.
+    TaskSwitchWritten {
+        note: NoteId,
+        before: String,
+        after: String,
+    },
+    /// [`Op::EditTaskLine`] found its task on line `line`, reading
+    /// `source`, and had nothing to change there. Nothing was written;
+    /// the note as read is what the indexes hold now.
+    TaskLineKept {
+        note: NoteId,
+        line: usize,
+        source: String,
+    },
+    /// A task write found the note changed and wrote nothing. The note
+    /// was read again, so the task index holds it as it is now: whatever
+    /// lists its tasks should list them afresh.
+    TaskWriteStale {
+        note: NoteId,
+    },
+}
+
+/// What a write to a note that is not open comes to, once planned on the
+/// note's text.
+enum Planned {
+    /// The text to write, and the event that says what was written.
+    Write(String, Event),
+    /// Nothing changes; what to say of it, if anything.
+    Kept(Option<Event>),
 }
 
 #[derive(Debug)]
@@ -236,7 +320,8 @@ pub struct SessionOptions {
     /// Whether board notes are scanned, listed, indexed and opened.
     pub boards: bool,
     /// Whether the app's tasks are on: previews and search snippets then
-    /// read a task box of any status, as the editor does.
+    /// read a task box of any status, as the editor does, the task index
+    /// is built, and `.wren/tasks.toml` is read and may be written.
     pub tasks: bool,
 }
 
@@ -248,10 +333,6 @@ impl SessionOptions {
             scan::Kinds::MARKDOWN
         }
     }
-
-    fn boxes(self) -> wren_markdown::block::Boxes {
-        wren_markdown::block::Boxes::with_tasks(self.tasks)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -260,10 +341,23 @@ enum Navigation {
     History(usize),
 }
 
+/// One stop in Back and Forward history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Visit {
+    /// Names the stop for as long as the Session lives: a later stop has a
+    /// larger one and none is used twice, so a frontend can hang stops of
+    /// its own (views that are not notes) off a note's. Never stored.
+    pub serial: u64,
+    pub note: NoteId,
+}
+
 pub struct Session {
     store: FsStore,
     model: Workspace,
     state: WorkspaceState,
+    /// `.wren/tasks.toml`; `None` with tasks off, when it is neither read
+    /// nor written.
+    tasks_file: Option<TasksFile>,
     index: Index,
     selected_parent: Option<Parent>,
     watcher: Option<Watch>,
@@ -273,8 +367,10 @@ pub struct Session {
     started: Instant,
     last_poll: Duration,
     last_durability_retry: Duration,
-    history: Vec<NoteId>,
+    history: Vec<Visit>,
     history_index: Option<usize>,
+    /// The serial the next [`Visit`] takes.
+    history_serial: u64,
     recent: Vec<NoteId>,
     last_save_micros: u128,
     options: SessionOptions,
@@ -288,6 +384,9 @@ pub struct Session {
     // Notes whose model metadata or index text the owner refreshed while a job
     // was in flight. Their newer owner state wins over the job's snapshot read.
     touched: HashSet<NoteId>,
+    // Those of them the owner last found with no file. A job that did not
+    // find such a note agrees with the owner: its result is not older.
+    missing: HashSet<NoteId>,
     /// When the open board last sent a draft whose labels the index has
     /// not extracted yet.
     index_drafted: Option<Duration>,
@@ -341,7 +440,13 @@ impl Session {
         let store = FsStore::open(path).map_err(|error| error.to_string())?;
         // Subscribe before scanning so an edit during the initial scan is reconciled.
         let watch = Watch::new(store.root(), generation);
-        let mut index = Index::with_boxes(options.boxes());
+        let mut index = Index::with_tasks(options.tasks);
+        // Before the scan, so each note is found under its folder's
+        // exclusion or not.
+        let tasks_file = options.tasks.then(|| TasksFile::load(&store));
+        if let Some(file) = &tasks_file {
+            index.exclude_tasks(&file.excluded());
+        }
         let mut model =
             scan::scan_with_contents(store.reader(), None, options.kinds(), |note, contents| {
                 index.ingest(note, contents);
@@ -364,6 +469,12 @@ impl Session {
                 message: warning.into(),
             });
         }
+        if let Some(warning) = tasks_file.as_ref().and_then(TasksFile::warning) {
+            model.warnings.push(model::ScanWarning {
+                path: store.root().join(".wren/tasks.toml"),
+                message: warning.into(),
+            });
+        }
         let notes_by_path: HashMap<_, _> = model
             .notes
             .iter()
@@ -374,7 +485,10 @@ impl Session {
         let mut through_position = 0usize;
         for (position, path) in state.history().iter().enumerate() {
             if let Some(note) = notes_by_path.get(path) {
-                history.push(*note);
+                history.push(Visit {
+                    serial: history.len() as u64,
+                    note: *note,
+                });
                 if saved_position.is_some_and(|saved| position <= saved) {
                     through_position += 1;
                 }
@@ -388,7 +502,7 @@ impl Session {
         let recent_paths = state.recent();
         let restoring_recent = !recent_paths.is_empty();
         let recent: Vec<_> = if !restoring_recent {
-            history.clone()
+            history.iter().map(|visit| visit.note).collect()
         } else {
             recent_paths
                 .iter()
@@ -399,6 +513,7 @@ impl Session {
             store,
             model,
             state,
+            tasks_file,
             index,
             selected_parent: None,
             watcher,
@@ -408,6 +523,7 @@ impl Session {
             started: Instant::now(),
             last_poll: Duration::ZERO,
             last_durability_retry: Duration::ZERO,
+            history_serial: history.len() as u64,
             history,
             history_index,
             recent: Vec::new(),
@@ -419,6 +535,7 @@ impl Session {
             reconcile_job: None,
             tree_revision: 0,
             touched: HashSet::new(),
+            missing: HashSet::new(),
             index_drafted: None,
         };
         session.sort_model();
@@ -438,6 +555,7 @@ impl Session {
                 .flatten()
                 .find_map(|path| session.resolve_selection(&path))
             });
+        let mut unopened = None;
         if let Some((parent, note)) = selected {
             session.selected_parent = Some(parent);
             if let Some(note) = note {
@@ -450,14 +568,22 @@ impl Session {
                     .and_then(|file| Document::new(entry, file))
                 {
                     Ok(document) => session.document = Some(document),
-                    Err(message) => session.model.warnings.push(model::ScanWarning {
-                        path: session.store.root().join(path.as_path()),
-                        message,
-                    }),
+                    Err(message) => {
+                        unopened = Some(note);
+                        session.model.warnings.push(model::ScanWarning {
+                            path: session.store.root().join(path.as_path()),
+                            message,
+                        });
+                    }
                 }
             }
         }
         session.index.sync_metadata(&session.model);
+        if let Some(note) = unopened {
+            // What the scan read of it a moment ago can no longer be read
+            // so: the indexes and the model take what is there now.
+            let _ = session.reread(note);
+        }
         if let Some(document) = &session.document {
             session
                 .index
@@ -477,12 +603,13 @@ impl Session {
             if session
                 .history_index
                 .and_then(|position| session.history.get(position))
-                != Some(&note)
+                .map(|visit| visit.note)
+                != Some(note)
             {
                 session.history_index = session
                     .history
                     .iter()
-                    .rposition(|candidate| *candidate == note);
+                    .rposition(|candidate| candidate.note == note);
                 if session.history_index.is_none() {
                     session.record_history(note);
                 }
@@ -507,6 +634,24 @@ impl Session {
     pub fn index(&self) -> &Index {
         &self.index
     }
+    /// The task index; `None` with tasks off, when none is built.
+    pub fn tasks(&self) -> Option<&TaskIndex> {
+        self.index.tasks()
+    }
+    /// `.wren/tasks.toml` as read; `None` with tasks off.
+    pub fn tasks_file(&self) -> Option<&TasksFile> {
+        self.tasks_file.as_ref()
+    }
+    /// The filters remembered for the task view of `scope` (the workspace
+    /// for `None`); the defaults for a scope with none, and with tasks off.
+    pub fn task_filters(&self, scope: Option<ItemRef>) -> TaskFilters {
+        let path = scope.map(|scope| self.model.path(scope));
+        match (&self.tasks_file, path) {
+            (Some(file), None) => file.filters(None),
+            (Some(file), Some(Some(path))) => file.filters(Some(path)),
+            _ => TaskFilters::default(),
+        }
+    }
     pub fn selected_parent(&self) -> Option<Parent> {
         self.selected_parent
     }
@@ -522,8 +667,55 @@ impl Session {
     pub fn pending_durability(&self) -> bool {
         self.store.pending_durability()
     }
+    /// Whether a best-effort write's directory (task settings) is still
+    /// unsynced; ticks retry it.
+    pub fn pending_best_effort(&self) -> bool {
+        self.store.pending_best_effort()
+    }
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
+    }
+    #[doc(hidden)]
+    pub fn fail_times(&mut self, fault: Fault, times: u32) {
+        self.store.fail_times(fault, times);
+    }
+    /// Whether the open document's file no longer holds the bytes the
+    /// document was read from or last saved as: another program has
+    /// written it, or taken it away, since, and the Session has not yet
+    /// reconciled the two. `false` with no document open. It reads the
+    /// file and changes nothing: what to do about a difference is the
+    /// document's own reconciliation (`Op::Reconcile`, or a Tick).
+    pub fn document_changed_on_disk(&self) -> Result<bool, String> {
+        let Some(document) = &self.document else {
+            return Ok(false);
+        };
+        match self.store.read(&document.entry.path) {
+            Ok(file) => Ok(file.bytes != document.baseline),
+            Err(error) if error.is_not_found() => Ok(true),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    /// For tests, as [`Session::fail_next`] is: `writer` runs inside the
+    /// next write to the workspace, after its comparison with the bytes
+    /// expected and before its publication, as another program may.
+    #[doc(hidden)]
+    pub fn race_next_write(&mut self, writer: impl FnOnce() + Send + 'static) {
+        self.store.race_next(writer);
+    }
+    /// For tests, as [`Session::fail_next`] is: lower the search index's
+    /// content budget to `bytes`, dropping content that no longer fits.
+    #[doc(hidden)]
+    pub fn limit_search_content(&mut self, bytes: usize) {
+        let open = self.document.as_ref().map(|document| document.note);
+        self.index.shrink_budget(bytes, open);
+    }
+    /// Back and Forward history, oldest first.
+    pub fn visits(&self) -> &[Visit] {
+        &self.history
+    }
+    /// Where in [`Self::visits`] the open note is.
+    pub fn visit_position(&self) -> Option<usize> {
+        self.history_index
     }
     pub fn can_back(&self) -> bool {
         self.history_index.is_some_and(|index| index > 0)
@@ -742,8 +934,59 @@ impl Session {
                 events.push(Event::TreeChanged);
                 self.persist_metadata(events)
             }
+            Op::SetTasksExcluded { target, excluded } => {
+                if matches!(target, ItemRef::Note(_)) {
+                    return Err("Only a section or a group can be left out of task views".into());
+                }
+                let path = self.item_path(target)?;
+                self.set_excluded_saved(&path, excluded, events)
+            }
+            Op::SetTaskFilters { scope, filters } => {
+                let path = scope.map(|scope| self.item_path(scope)).transpose()?;
+                self.tasks_file_mut()?
+                    .set_filters(path.as_ref(), &filters)?;
+                self.persist_tasks_file(events)
+            }
+            Op::EditTaskLine {
+                note,
+                line,
+                expect,
+                change,
+            } => self.write_closed(note, now, events, task_write::CHANGED, |source| {
+                let write = task_write::plan_line(source, line, &expect, &change)?;
+                if !write.changes() {
+                    return Ok(Planned::Kept(Some(Event::TaskLineKept {
+                        note,
+                        line: write.line,
+                        source: write.before,
+                    })));
+                }
+                let text = write.apply(source);
+                let written = Event::TaskLineWritten {
+                    note,
+                    line: write.line,
+                    before: write.before,
+                    after: write.after,
+                };
+                Ok(Planned::Write(text, written))
+            }),
+            Op::EditTaskSwitch { note, change } => {
+                self.write_closed(note, now, events, task_write::SWITCH_CHANGED, |source| {
+                    let Some(write) = task_write::plan_switch(source, &change)? else {
+                        return Ok(Planned::Kept(None));
+                    };
+                    let text = write.apply(source);
+                    let written = Event::TaskSwitchWritten {
+                        note,
+                        before: write.before,
+                        after: write.after,
+                    };
+                    Ok(Planned::Write(text, written))
+                })
+            }
             Op::Flush => {
                 self.flush_active(now, true, events)?;
+                self.retry_tasks_file();
                 self.store
                     .retry_durability()
                     .map_err(|error| error.to_string())?;
@@ -805,13 +1048,18 @@ impl Session {
                     .notes
                     .retain(|item| !item.path.as_path().starts_with(path.as_path()));
                 self.state.remove_paths(&path);
+                if let Some(file) = &mut self.tasks_file {
+                    file.remove_paths(&path);
+                }
+                self.sync_task_exclusions();
                 if active_removed {
                     self.document = None;
                     events.push(Event::Selected(None));
                 }
                 self.prune_history();
                 events.push(Event::TreeChanged);
-                self.finish_structure(events)
+                let finished = self.finish_structure(events);
+                finished.and(self.persist_tasks_file(events))
             }
             Op::Reorder { target, before } => {
                 if !self.state.writable() {
@@ -855,11 +1103,27 @@ impl Session {
                 self.reconcile_job = None;
                 self.reconcile_requested = true;
                 self.flush_active(now, true, events)?;
+                let tasks_saved = self.persist_tasks_file(&mut Vec::new());
                 self.store
                     .retry_durability()
                     .map_err(|error| error.to_string())?;
                 if std::fs::canonicalize(&path).ok().as_deref() == Some(self.store.root()) {
                     return Ok(());
+                }
+                let unsaved = self.tasks_file.as_ref().is_some_and(TasksFile::dirty);
+                if let (Err(error), true) = (tasks_saved, unsaved) {
+                    // The settings are read again from disk by the next
+                    // load, so what could not be saved is lost: said, not
+                    // blocking.
+                    events.push(Event::Warning(format!(
+                        "Task settings changed in the workspace left were not saved: {error}"
+                    )));
+                } else if self.store.pending_best_effort() {
+                    events.push(Event::Warning(
+                        "Task settings in the workspace left were saved, but their durability \
+                         could not be confirmed"
+                            .into(),
+                    ));
                 }
                 // Construct the replacement before releasing any old state or lock.
                 let mut replacement = Self::load(
@@ -886,10 +1150,102 @@ impl Session {
                     (current + 1 < self.history.len()).then_some(current + 1)
                 }
                 .ok_or("No further navigation history")?;
-                let note = self.history[index];
+                let note = self.history[index].note;
                 self.select(Some(note), now, Navigation::History(index), events)
             }
         }
+    }
+
+    /// Rewrite the Markdown note `note`, which is not open, as `plan`
+    /// makes of its text: the text to write and the event that says what
+    /// was written, or, when nothing changes, what to say of that. Nothing
+    /// is written then, but the bytes read are the newest known of the
+    /// note, and both indexes and the model take them.
+    ///
+    /// The open document is settled first, so two writers never race: a
+    /// flush that fails blocks the write and keeps the draft. The write
+    /// is a compare-and-swap on the bytes the plan was made on. When the
+    /// plan finds its place changed, or the file changes under the write,
+    /// nothing is written and no conflict copy is made (those are for an
+    /// open document's draft): the note is read again, so both indexes
+    /// hold it as it is, and the op fails with `stale`. The bytes
+    /// published reach both indexes and the model at once, and a scan
+    /// begun before the write cannot put the older text back.
+    fn write_closed(
+        &mut self,
+        note: NoteId,
+        now: Duration,
+        events: &mut Vec<Event>,
+        stale: &str,
+        plan: impl FnOnce(&str) -> Result<Planned, Refused>,
+    ) -> Result<(), String> {
+        if !self.options.tasks {
+            return Err("Tasks are turned off; set `tasks = on` to change tasks".into());
+        }
+        let Some(entry) = self.model.note(note) else {
+            events.push(Event::TaskWriteStale { note });
+            return Err(stale.into());
+        };
+        if entry.kind != NoteKind::Markdown {
+            return Err("Only a Markdown note holds tasks".into());
+        }
+        if self
+            .document
+            .as_ref()
+            .is_some_and(|document| document.note == note)
+        {
+            return Err("The open note is changed in its editor".into());
+        }
+        let path = entry.path.clone();
+        self.flush_active(now, true, events)?;
+        let mut refresh = |session: &mut Self| {
+            session.reread(note);
+            events.push(Event::TaskWriteStale { note });
+            stale.to_owned()
+        };
+        let file = match self.store.read(&path) {
+            Ok(file) => file,
+            Err(error) if error.is_not_found() => return Err(refresh(self)),
+            Err(error) => return Err(error.to_string()),
+        };
+        let Ok(source) = std::str::from_utf8(&file.bytes) else {
+            // Bytes that are no text are still the newest known of the
+            // note: both indexes give up the text they held, as a fresh
+            // read does.
+            self.index.take_read(note, &file.bytes);
+            self.record_file(note, &file);
+            return Err("The note is not valid UTF-8; it was left untouched".into());
+        };
+        let (text, written) = match plan(source) {
+            Ok(Planned::Write(text, written)) => (text, written),
+            Ok(Planned::Kept(kept)) => {
+                self.index.set_content(note, source, false);
+                self.record_file(note, &file);
+                events.extend(kept);
+                return Ok(());
+            }
+            Err(Refused::Changed) => return Err(refresh(self)),
+            Err(Refused::Invalid(why)) => return Err(why),
+        };
+        let receipt = match (self.store).write(&path, text.as_bytes(), Expected::Bytes(&file.bytes))
+        {
+            Ok(receipt) => receipt,
+            Err(error) if error.is_conflict() => return Err(refresh(self)),
+            Err(error) => return Err(error.to_string()),
+        };
+        self.index.set_content(note, &text, false);
+        self.record_file(note, &receipt.file);
+        events.push(written);
+        if let Some(error) = receipt.durability_error {
+            return Err(format!(
+                "The note was written, but durability is unconfirmed: {error}"
+            ));
+        }
+        events.push(Event::NoteSaved {
+            note,
+            mtime: receipt.file.modified,
+        });
+        Ok(())
     }
 
     fn edit_draft(
@@ -973,11 +1329,17 @@ impl Session {
                         .note(note)
                         .cloned()
                         .ok_or("The note no longer exists")?;
-                    let file = self
-                        .store
-                        .read(&entry.path)
-                        .map_err(|error| error.to_string())?;
-                    Document::new(entry, file)
+                    let read = (self.store.read(&entry.path))
+                        .map_err(|error| error.to_string())
+                        .and_then(|file| Document::new(entry, file));
+                    if read.is_err() {
+                        // The note cannot be opened as the indexes hold it:
+                        // they and the model take what is there now, or
+                        // nothing, and a scan begun before this cannot put
+                        // it back. The open document stays as it is.
+                        let _ = self.reread(note);
+                    }
+                    read
                 })
                 .transpose()?;
             if let Some(document) = &document {
@@ -1293,7 +1655,9 @@ impl Session {
         {
             self.flush_active(now, false, events)?;
         }
-        if self.store.pending_durability()
+        // A best-effort sync (task settings) is retried on ticks too; its
+        // failing again is never an error of the retry.
+        if (self.store.pending_durability() || self.store.pending_best_effort())
             && now.saturating_sub(self.last_durability_retry) >= Duration::from_secs(1)
         {
             self.last_durability_retry = now;
@@ -1347,6 +1711,7 @@ impl Session {
         };
         let ticket = reconcile::next_ticket();
         self.touched.clear();
+        self.missing.clear();
         self.reconcile_in_flight = Some(ticket);
         self.reconcile_job = Some(ReconcileJob::new(
             Tags {
@@ -1385,11 +1750,59 @@ impl Session {
         // One fresh read keeps conflict protection for the active note exactly
         // as in synchronous reconciliation, independent of the snapshot. It runs
         // while still in flight so a reload marks the note as touched.
+        let open = self.document.as_ref().map(|document| document.note);
         let document_result = self.reconcile_document(now, events);
+        // The open note found deleted just now is the newest there is to
+        // know of it. The indexes give up its text at once; should a file
+        // be back there already, they take that, and the note stays.
+        let gone = open
+            .filter(|_| self.document.is_none())
+            .filter(|gone| self.reread(*gone));
         self.reconcile_in_flight = None;
-        if self.tree_revision != tags.tree_revision {
+        let mut outcome = outcome;
+        if let (Some(gone), Ok(scanned)) = (gone, &mut outcome) {
+            // A job that read the note before it was deleted still lists it,
+            // with the text it read: neither is true any more. Without the
+            // note, its result is as good as one that never found it, and
+            // the rest of what it read is merged now.
+            scanned.model.notes.retain(|note| note.id != gone);
+            scanned.contents.retain(|(note, ..)| *note != gone);
+            scanned.extracted.retain(|(note, ..)| *note != gone);
+            scanned.changed |= self.model.note(gone).is_some();
+        }
+        // A result that did not find a note the owner has read or written
+        // since must not take that note, and what is known of it, away:
+        // unless the owner's own last look found no file either. The
+        // owner looks again now, so a note deleted after it was touched
+        // does not hold back a result that is right about it.
+        let omitted: Vec<NoteId> = match &outcome {
+            Ok(scanned) if scanned.changed => (self.touched.iter())
+                .copied()
+                .filter(|note| {
+                    !self.missing.contains(note)
+                        && self.model.note(*note).is_some()
+                        && scanned.model.note(*note).is_none()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for note in omitted {
+            if self.reread(note) {
+                self.missing.insert(note);
+            }
+        }
+        let omits_touched = outcome.as_ref().is_ok_and(|scanned| {
+            scanned.changed
+                && (self.touched.iter()).any(|note| {
+                    !self.missing.contains(note)
+                        && self.model.note(*note).is_some()
+                        && scanned.model.note(*note).is_none()
+                })
+        });
+        if self.tree_revision != tags.tree_revision || omits_touched {
             // Own structural changes (or a conflict-copy rescan) happened after
-            // the snapshot; its IDs and paths cannot be merged safely. Labels
+            // the snapshot, or the result is older than what the owner knows
+            // of a note; its IDs and paths cannot be merged safely. Labels
             // name the source they came from, so they still apply.
             if let Ok(scanned) = outcome {
                 for (note, source, text) in scanned.extracted {
@@ -1405,8 +1818,12 @@ impl Session {
                 Ok(())
             }
             Err(error) => {
+                // The failure is of the disk as the job found it. What the
+                // owner has read or written since is newer than that.
+                let active = self.document.as_ref().map(|document| document.note);
+                let touched = &self.touched;
                 self.index
-                    .scan_failed(self.document.as_ref().map(|document| document.note));
+                    .scan_failed(|note| Some(note) == active || touched.contains(&note));
                 Err(error)
             }
         };
@@ -1593,6 +2010,13 @@ impl Session {
             }
         }
         self.state.remap_paths(from, &receipt.path);
+        if let Some(file) = &mut self.tasks_file {
+            file.remap_paths(from, &receipt.path);
+        }
+        self.sync_task_exclusions();
+        // The move is published: the settings that name it are saved now,
+        // whatever fails below.
+        let tasks_saved = self.persist_tasks_file(events);
         let ordering = moved_group_section.map_or(Ok(()), |section| {
             let siblings: Vec<_> = self
                 .model
@@ -1639,7 +2063,8 @@ impl Session {
             ));
         }
         ordering?;
-        self.persist_metadata(events)
+        let persisted = self.persist_metadata(events);
+        persisted.and(tasks_saved)
     }
 
     fn finish_structure(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
@@ -1671,7 +2096,8 @@ impl Session {
         let scanned = match scanned {
             Ok(scanned) => scanned,
             Err(error) => {
-                self.index.scan_failed(active.map(|(id, _)| id));
+                let active = active.map(|(id, _)| id);
+                self.index.scan_failed(|note| Some(note) == active);
                 return Err(error.to_string());
             }
         };
@@ -1798,7 +2224,7 @@ impl Session {
         let history = self
             .history
             .iter()
-            .filter_map(|note| paths.get(note).map(|path| (*path).clone()))
+            .filter_map(|visit| paths.get(&visit.note).map(|path| (*path).clone()))
             .collect::<Vec<_>>();
         let recent = self
             .recent
@@ -1822,11 +2248,90 @@ impl Session {
         })
     }
 
+    fn tasks_file_mut(&mut self) -> Result<&mut TasksFile, String> {
+        self.tasks_file
+            .as_mut()
+            .ok_or_else(|| "Tasks are turned off; set `tasks = on` to use task views".into())
+    }
+
+    /// Hand the task index the folders `.wren/tasks.toml` excludes now.
+    fn sync_task_exclusions(&mut self) {
+        if let Some(file) = &self.tasks_file {
+            self.index.exclude_tasks(&file.excluded());
+        }
+    }
+
+    /// Leave `folder` out of task views, or bring it back, all or nothing:
+    /// when `.wren/tasks.toml` cannot be published, the list and the task
+    /// index stay as they were and the op fails. A file published whose
+    /// durability is unconfirmed keeps the change, with a warning.
+    fn set_excluded_saved(
+        &mut self,
+        folder: &RelPath,
+        excluded: bool,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        self.tasks_file_mut()?;
+        let Some(file) = self.tasks_file.as_mut() else {
+            return Ok(());
+        };
+        let before = file.clone();
+        if !file.set_excluded(folder, excluded)? {
+            return Ok(());
+        }
+        match file.save(&mut self.store) {
+            Ok(()) => {}
+            // Not published: as if nothing had been asked.
+            Err(error) if file.dirty() => {
+                *file = before;
+                return Err(format!(
+                    "Task settings were not saved, so nothing changed: {error}"
+                ));
+            }
+            Err(error) => events.push(Event::Warning(error)),
+        }
+        self.sync_task_exclusions();
+        Ok(())
+    }
+
+    /// Save `.wren/tasks.toml` if an op changed it. It is created only
+    /// once it has something to hold.
+    fn persist_tasks_file(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
+        let Some(file) = &mut self.tasks_file else {
+            return Ok(());
+        };
+        if !file.dirty() {
+            return Ok(());
+        }
+        file.save(&mut self.store).map_err(|error| {
+            // Published, its durability unconfirmed: saved, and said so.
+            events.push(Event::Warning(if file.dirty() {
+                format!("The change remains applied; task settings were not saved: {error}")
+            } else {
+                error.clone()
+            }));
+            error
+        })
+    }
+
+    /// Save task settings an earlier op changed but could not save (a
+    /// rename that published while `.wren/tasks.toml` could not be
+    /// written), over the bytes last read or saved as every save is. That
+    /// failure was reported when it happened; one still failing here stays
+    /// pending for the next flush, rather than blocking the flush.
+    fn retry_tasks_file(&mut self) {
+        if let Some(file) = &mut self.tasks_file {
+            if file.dirty() {
+                let _ = file.save(&mut self.store);
+            }
+        }
+    }
+
     fn record_history(&mut self, note: NoteId) {
         if self
             .history_index
             .and_then(|index| self.history.get(index))
-            .copied()
+            .map(|visit| visit.note)
             == Some(note)
         {
             return;
@@ -1834,7 +2339,11 @@ impl Session {
         if let Some(index) = self.history_index {
             self.history.truncate(index + 1);
         }
-        self.history.push(note);
+        self.history.push(Visit {
+            serial: self.history_serial,
+            note,
+        });
+        self.history_serial += 1;
         if self.history.len() > MAX_NAVIGATION_ENTRIES {
             self.history.remove(0);
         }
@@ -1855,8 +2364,8 @@ impl Session {
         let ids: HashSet<_> = self.model.notes.iter().map(|note| note.id).collect();
         let mut through_position = 0usize;
         let mut position = 0usize;
-        self.history.retain(|id| {
-            let keep = ids.contains(id);
+        self.history.retain(|visit| {
+            let keep = ids.contains(&visit.note);
             if keep
                 && self
                     .history_index
@@ -1904,6 +2413,31 @@ impl Session {
     fn touch(&mut self, note: NoteId) {
         if self.reconcile_in_flight.is_some() {
             self.touched.insert(note);
+            self.missing.remove(&note);
+        }
+    }
+
+    /// Read `note` afresh as a closed note: the indexes take its text, or
+    /// give it up, and the model the file's time and size, so a job in
+    /// flight, whose read of it is older, changes none of them. Returns
+    /// whether there was no file.
+    fn reread(&mut self, note: NoteId) -> bool {
+        match self.index.read_note(&self.store, note) {
+            Reread::Read(file) => {
+                self.record_file(note, &file);
+                false
+            }
+            Reread::Missing => {
+                self.touch(note);
+                if self.reconcile_in_flight.is_some() {
+                    self.missing.insert(note);
+                }
+                true
+            }
+            Reread::Failed => {
+                self.touch(note);
+                false
+            }
         }
     }
 
