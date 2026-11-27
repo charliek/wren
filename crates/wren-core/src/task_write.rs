@@ -550,13 +550,16 @@ fn key_of(line: &str) -> Key {
 }
 
 /// Whether the `tasks` line at `line` of front matter closed by `close`
-/// goes on under it: the next line that is not blank is indented, and
-/// YAML reads it as more of the value (`off` and `more` as one scalar),
-/// so the line is no switch to rewrite or take away.
+/// goes on under it: the next line that is neither blank nor a comment is
+/// indented, and YAML reads it as more of the value (`off` and `more` as
+/// one scalar), so the line is no switch to rewrite or take away.
 fn continued(document: &Document<'_>, line: usize, close: usize) -> bool {
     (line + 1..close)
         .map(|line| document.line(line))
-        .find(|text| !text.trim().is_empty())
+        .find(|text| {
+            let content = text.trim();
+            !content.is_empty() && !content.starts_with('#')
+        })
         .is_some_and(|text| text.starts_with([' ', '\t']))
 }
 
@@ -1303,10 +1306,19 @@ mod tests {
                 "{source:?}: {refused:?}"
             );
         }
-        // A switch line alone still goes.
+        // A switch line alone still goes, an indented comment under it
+        // being no part of its value.
         assert_eq!(
             switched("---\ntitle: |\n  Keep\ntasks: off\n---\n", false).0,
             "---\ntitle: |\n  Keep\n---\n"
+        );
+        assert_eq!(
+            switched("---\ntitle: A\ntasks: off\n  # keep this\n---\n", false).0,
+            "---\ntitle: A\n  # keep this\n---\n"
+        );
+        assert_eq!(
+            switched("---\ntitle: A\ntasks: on\n  # keep this\n---\n", true).0,
+            "---\ntitle: A\ntasks: off\n  # keep this\n---\n"
         );
     }
 

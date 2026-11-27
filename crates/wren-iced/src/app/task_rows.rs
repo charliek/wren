@@ -193,6 +193,7 @@ impl App {
         let Some(entry) = self.selected_row().filter(|_| act != RowAct::Refresh) else {
             if act == RowAct::Refresh {
                 self.task_list.held.clear();
+                self.task_list.reveal = true;
             }
             return (Task::none(), false);
         };
@@ -1791,10 +1792,12 @@ Lunch is sorted.
         assert_eq!(record.description, "Call Kim");
     }
 
-    /// CodeRabbit on PR #13: a selected row in sight stays in sight when
-    /// a rebuild moves it, so the next key acts on a row the user sees.
+    /// A rescan keeps the list where the user left it, even when it moves
+    /// the selected row out of sight; regrouping, which the user asks for,
+    /// keeps a selected row that was in sight in sight (CodeRabbit on
+    /// PR #13, and its review).
     #[test]
-    fn a_selected_row_in_sight_stays_in_sight_after_a_rebuild() {
+    fn a_rescan_keeps_the_offset_and_regrouping_keeps_the_selection_in_sight() {
         let (directory, mut app) = fixture();
         select(&mut app, "Order lunch");
         assert_eq!(app.task_list.scroll, 0.0);
@@ -1812,8 +1815,31 @@ Lunch is sorted.
             app.task_list.listing.record(entry).unwrap().description,
             "Order lunch"
         );
+        assert_eq!(app.task_list.scroll, 0.0, "a rescan keeps the offset");
+
+        // In sight, then regrouped by owner: Kim's group comes after the
+        // three hundred of Me, and the list goes to the row.
+        let mut text = String::from("# B\n\n");
+        text.push_str(LUNCH);
+        text.push_str(" @kim\n");
+        for at in 0..300 {
+            text.push_str(&format!("- [ ] Early {at}\n"));
+        }
+        write_b(&directory, &text);
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        select(&mut app, "Order lunch @kim");
+        assert_eq!(app.task_list.scroll, 0.0);
+        app.change_filters(|filters| {
+            filters.group_by = wren_core::tasks_file::GroupBy::Owner;
+        });
+        let _ = app.update(Message::Tick);
+        let entry = app.selected_row().expect("a row selected");
+        assert_eq!(
+            app.task_list.listing.record(entry).unwrap().description,
+            "Order lunch @kim"
+        );
         let top = app.task_list.listing.tops[entry];
-        assert!(top > 0.0);
         assert!(app.task_list.scroll > 0.0, "scrolled to it");
         assert!(top >= app.task_list.scroll);
     }

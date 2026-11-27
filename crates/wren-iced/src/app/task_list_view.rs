@@ -317,6 +317,10 @@ pub(super) struct ListState {
     /// The row a click of this batch selected: the second press of a
     /// double-click on its description goes on to edit it.
     selected_in_batch: Option<(u64, usize)>,
+    /// The next build follows from the user's asking the rows to move (a
+    /// filter, the grouping, R): a selected row in sight is kept in sight.
+    /// A build of the index's own (a rescan) keeps the list's offset.
+    pub reveal: bool,
 }
 
 impl ListState {
@@ -570,6 +574,8 @@ impl App {
             held: self.task_list.held.clone(),
         };
         if self.task_list.built.as_ref() == Some(&built) {
+            // Asked for nothing that moves a row: nothing to keep in sight.
+            self.task_list.reveal = false;
             return Task::none();
         }
         let new_scope = self
@@ -600,15 +606,16 @@ impl App {
         let height = self.list_height();
         let list = &mut self.task_list;
         let before = std::mem::replace(&mut list.listing, listing);
-        // Whether the selected row was in sight: if so, it is kept in
+        // Asked by the user, a selected row that was in sight is kept in
         // sight wherever the rebuild puts it, so a key acts on a row the
         // user can see.
         let in_sight = |tops: &[f32], entry: usize, scroll: f32| {
             tops.get(entry)
                 .is_some_and(|&top| top >= scroll && top + ROW_HEIGHT <= scroll + height)
         };
-        let seen = (list.selected.as_ref())
-            .is_some_and(|selected| in_sight(&before.tops, selected.entry, list.scroll));
+        let seen = std::mem::take(&mut list.reveal)
+            && (list.selected.as_ref())
+                .is_some_and(|selected| in_sight(&before.tops, selected.entry, list.scroll));
         list.titles = titles;
         list.footer = footer;
         list.generation += 1;
@@ -620,8 +627,12 @@ impl App {
             list.menu = None;
             list.describe = None;
         }
+        // Where the list stays: where it was, as far as the new list goes.
+        let scroll = list
+            .scroll
+            .min((list.listing.height() - list.height.unwrap_or(0.0)).max(0.0));
         // An edit follows its row, and ends when the list no longer shows it.
-        self.follow_describe(&before.records);
+        self.follow_describe(&before.records, scroll);
         let list = &mut self.task_list;
         let previous = list.selected.take();
         let entry = previous
@@ -645,9 +656,6 @@ impl App {
                 Control::Source(_) | Control::Row(_) | Control::Cell(..)
             )
         });
-        let scroll = list
-            .scroll
-            .min((list.listing.height() - list.height.unwrap_or(0.0)).max(0.0));
         if let Some(entry) =
             entry.filter(|&entry| seen && !in_sight(&list.listing.tops, entry, scroll))
         {
@@ -1075,6 +1083,7 @@ impl App {
             // The rows held move to where the new filters put them.
             self.task_list.held.clear();
             self.task_list.describe = None;
+            self.task_list.reveal = true;
             let _ = self.process_core(Op::SetTaskFilters {
                 scope: item,
                 filters,
@@ -1830,8 +1839,13 @@ impl App {
     /// The entries whose rows are built: those in view, and a screen's
     /// worth on each side, so a scroll shows built rows.
     pub(super) fn built_rows(&self) -> std::ops::Range<usize> {
+        self.built_rows_at(self.task_list.scroll)
+    }
+
+    /// The rows built with the list scrolled to `scroll`.
+    pub(super) fn built_rows_at(&self, scroll: f32) -> std::ops::Range<usize> {
         let height = self.list_height();
-        (self.task_list.listing).visible((self.task_list.scroll - height).max(0.0), 3.0 * height)
+        (self.task_list.listing).visible((scroll - height).max(0.0), 3.0 * height)
     }
 
     /// The rows in view, between spaces for those out of it.

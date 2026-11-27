@@ -620,16 +620,20 @@ impl TasksFile {
             .map_err(|error| format!("Could not serialize {TASKS_PATH}: {error}"))?
             .into_bytes();
         let directory = RelPath::new(".wren").expect("constant metadata directory is relative");
-        store
-            .ensure_dir(&directory)
-            .map_err(|error| format!("Could not create .wren: {error}"))?;
         let expected = match self.baseline.as_deref() {
             Some(bytes) => Expected::Bytes(bytes),
             None => Expected::Missing,
         };
-        let receipt = store
-            .write(&file_path(), &bytes, expected)
-            .map_err(|error| format!("Could not save {TASKS_PATH}: {error}"))?;
+        // Task settings are no draft: a sync that fails is retried, but
+        // never holds back a flush or a workspace switch.
+        let receipt = store.best_effort(|store| {
+            store
+                .ensure_dir(&directory)
+                .map_err(|error| format!("Could not create .wren: {error}"))?;
+            store
+                .write(&file_path(), &bytes, expected)
+                .map_err(|error| format!("Could not save {TASKS_PATH}: {error}"))
+        })?;
         // Published: a durability failure must not make a retry conflict
         // with our own write.
         self.baseline = Some(receipt.file.bytes);

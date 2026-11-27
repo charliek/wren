@@ -670,6 +670,10 @@ impl Session {
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
     }
+    #[doc(hidden)]
+    pub fn fail_times(&mut self, fault: Fault, times: u32) {
+        self.store.fail_times(fault, times);
+    }
     /// Whether the open document's file no longer holds the bytes the
     /// document was read from or last saved as: another program has
     /// written it, or taken it away, since, and the Session has not yet
@@ -1109,6 +1113,12 @@ impl Session {
                     events.push(Event::Warning(format!(
                         "Task settings changed in the workspace left were not saved: {error}"
                     )));
+                } else if self.store.pending_best_effort() {
+                    events.push(Event::Warning(
+                        "Task settings in the workspace left were saved, but their durability \
+                         could not be confirmed"
+                            .into(),
+                    ));
                 }
                 // Construct the replacement before releasing any old state or lock.
                 let mut replacement = Self::load(

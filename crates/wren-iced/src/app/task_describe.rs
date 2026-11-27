@@ -185,7 +185,7 @@ impl App {
     /// task of its own, as for a held row), and the write goes there too:
     /// the field never shows on one line and writes another. Two such
     /// lines cannot be told apart, and close the field.
-    pub(super) fn follow_describe(&mut self, previous: &[TaskRecord]) {
+    pub(super) fn follow_describe(&mut self, previous: &[TaskRecord], scroll: f32) {
         let list = &mut self.task_list;
         let Some(describe) = &mut list.describe else {
             return;
@@ -215,9 +215,10 @@ impl App {
             Some(entry) => describe.entry = entry,
             None => list.describe = None,
         }
-        // Moved out of the rows built, it has no field to type in, and the
-        // list's keys wait while one is open: the edit ends.
-        let built = self.built_rows();
+        // Moved out of the rows built at `scroll`, where the list stays, it
+        // has no field to type in, and the list's keys wait while one is
+        // open: the edit ends.
+        let built = self.built_rows_at(scroll);
         if (self.task_list.describe.as_ref())
             .is_some_and(|describe| !built.contains(&describe.entry))
         {
@@ -1238,6 +1239,42 @@ mod tests {
         let _ = app.update(Message::Tick);
         assert_eq!(field_text(&app), None);
         assert!(app.task_list.describe.is_none());
+    }
+
+    /// Review of the CodeRabbit round: whether the edited row is built is
+    /// asked where the list stays after a rebuild, its offset clamped to
+    /// the shorter list, not where it was.
+    #[test]
+    fn an_edit_far_down_stays_when_a_rebuild_shortens_the_list_above_it() {
+        let (directory, mut app) = fixture();
+        let b = directory.path().join("workspace/Work/Tasks/B.md");
+        let rescan = |app: &mut App, text: &str| {
+            std::fs::write(&b, text).unwrap();
+            let _ = app.process_core(wren_core::ops::Op::Reconcile);
+            let _ = app.update(Message::Tick);
+        };
+        let mut long = String::from("# B\n\n");
+        for at in 0..300 {
+            long.push_str(&format!("- [ ] Early {at}\n"));
+        }
+        long.push_str("- [ ] Order lunch\n- [ ] Zed\n");
+        rescan(&mut app, &long);
+        let scroll = app.task_list.scroll;
+        let _ = app.update(Message::TaskView(Event::Scrolled {
+            y: scroll,
+            height: 400.0,
+        }));
+        select(&mut app, "Order lunch");
+        assert!(app.task_list.scroll > 2000.0, "{}", app.task_list.scroll);
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea")]);
+        rescan(
+            &mut app,
+            "# B\n\n- [ ] Early 0\n- [ ] Order lunch\n- [ ] Zed\n",
+        );
+        assert_eq!(field_text(&app).as_deref(), Some("Order tea"));
+        field_batch(&mut app, &[LineEvent::Enter]);
+        assert!(on_disk(&directory, "B").contains("- [ ] Order tea\n"));
     }
 
     #[test]

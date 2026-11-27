@@ -1626,3 +1626,51 @@ fn a_published_filter_change_is_not_said_to_be_unsaved() {
         .unwrap()
         .contains("owner"));
 }
+
+/// The settings retry is best effort (review of the CodeRabbit round): a
+/// `.wren` that will not sync neither fails the flush that retried them
+/// nor stops a workspace switch, which only warns.
+#[test]
+fn a_settings_retry_that_cannot_sync_blocks_no_flush_or_switch() {
+    use wren_core::fs_store::Fault;
+    let root = fixture();
+    let mut session = session(root.path());
+    let plans = ItemRef::Group(group(&session, "Work/Plans"));
+    run(
+        &mut session,
+        Op::SetTasksExcluded {
+            target: plans,
+            excluded: true,
+        },
+    );
+    session.fail_next(Fault::Write);
+    let new_name = "Goals".into();
+    let _ = session.apply_at(
+        Op::Rename {
+            target: plans,
+            new_name,
+        },
+        Duration::ZERO,
+    );
+    // The retry publishes; its sync fails, and so does the sync retried.
+    session.fail_times(Fault::DirectorySync, 2);
+    run(&mut session, Op::Flush);
+    let saved = fs::read_to_string(root.path().join(TASKS_FILE)).unwrap();
+    assert!(saved.contains("Work/Goals"), "{saved}");
+    assert!(!session.pending_durability());
+
+    // The same on leaving the workspace, after another unsaved change.
+    session.fail_next(Fault::Write);
+    let target = ItemRef::Group(group(&session, "Work/Goals"));
+    let new_name = "Aims".into();
+    let _ = session.apply_at(Op::Rename { target, new_name }, Duration::ZERO);
+    session.fail_times(Fault::DirectorySync, 2);
+    let other = TempDir::new().unwrap();
+    let away = other.path().to_path_buf();
+    let events = run(&mut session, Op::OpenWorkspace { path: away });
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::Warning(warning) if warning.contains("durability"))));
+    let saved = fs::read_to_string(root.path().join(TASKS_FILE)).unwrap();
+    assert!(saved.contains("Work/Aims"), "{saved}");
+}
