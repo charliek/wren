@@ -124,6 +124,30 @@ impl TaskRow {
         };
         (row.id() == id).then_some(row)
     }
+
+    /// What choosing the row does to its task: the change to write on its
+    /// line, or what it opens for the task instead. The same for a task of
+    /// the editor's and for a row of the task view.
+    pub(super) fn act(self) -> Result<Change, Follow> {
+        match self {
+            Self::Status(symbol) => Ok(Change::SetStatus(symbol)),
+            Self::Priority(level) => Ok(Change::SetPriority(level)),
+            Self::PriorityMenu => Err(Follow::PriorityMenu),
+            Self::Due => Err(Follow::Due),
+            Self::Edit => Err(Follow::Edit),
+        }
+    }
+}
+
+/// What a row that writes nothing opens for its task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Follow {
+    /// The priority menu.
+    PriorityMenu,
+    /// The calendar.
+    Due,
+    /// The task form.
+    Edit,
 }
 
 /// A level's place in [`Priority::ALL`], from one.
@@ -145,7 +169,7 @@ pub(super) const PRIORITY_ROWS: [(Option<Priority>, Accelerator); 6] = [
 /// The status rows for `task`'s box: each status Wren knows, its box drawn
 /// before it, the one the box holds checked. Done writes the `X` a box
 /// holds already, so choosing the status it has changes nothing.
-fn status_rows(task: block::Task) -> Vec<Row> {
+pub(super) fn status_rows(task: block::Task) -> Vec<Row> {
     let known = status::status(task.symbol).name != status::UNKNOWN;
     STATUSES
         .iter()
@@ -161,7 +185,7 @@ fn status_rows(task: block::Task) -> Vec<Row> {
 }
 
 /// The priority rows, the task's level checked.
-fn priority_rows(current: Option<Priority>) -> Vec<Row> {
+pub(super) fn priority_rows(current: Option<Priority>) -> Vec<Row> {
     PRIORITY_ROWS
         .iter()
         .map(|&(level, key)| {
@@ -177,7 +201,7 @@ fn priority_rows(current: Option<Priority>) -> Vec<Row> {
 }
 
 /// The rows of the menu of `kind` for the task `line` reads.
-fn rows(kind: MenuKind, line: &TaskLine<'_>) -> Vec<Row> {
+pub(super) fn rows(kind: MenuKind, line: &TaskLine<'_>) -> Vec<Row> {
     let current = line.priority().map(|token| token.level);
     match kind {
         MenuKind::Status => status_rows(line.task()),
@@ -229,6 +253,19 @@ fn task_of(spans: &LineSpans) -> Option<block::Task> {
         SpanKind::Box(task) => Some(task),
         _ => None,
     })
+}
+
+/// The task a row of the task view lists, read from its line alone: what
+/// its menus check and what the calendar opens on. A nested task's line,
+/// read alone, would be indented code, so what indents it is left out;
+/// the ranges the answer gives are of the line without it.
+// The task view's menus read their rows with it (the client of item 10.4
+// of discovery/tasks-build.md); until then only the tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn row_task(line: &str) -> Option<TaskLine<'_>> {
+    let line = line.trim_start();
+    let task = Scanner::new(Boxes::Status).next_line(line).item?.task?;
+    task::parse(line, task)
 }
 
 /// The menus' rows, for right-clicks and requests alike. It holds nothing:
@@ -509,21 +546,20 @@ impl App {
                 .blocked("This command is unavailable in the current context")
                 .task;
         };
-        let change = match row {
-            TaskRow::Status(symbol) => Change::SetStatus(symbol),
-            TaskRow::Priority(level) => Change::SetPriority(level),
-            TaskRow::PriorityMenu => {
+        let change = match row.act() {
+            Ok(change) => change,
+            Err(Follow::PriorityMenu) => {
                 let _ = self.open_menu_on(MenuKind::Priority, line);
                 return Task::none();
             }
-            TaskRow::Due => {
+            Err(Follow::Due) => {
                 let at = Anchor::Range {
                     line: choice.line,
                     range: choice.range.clone(),
                 };
                 return self.open_calendar(line, at).unwrap_or_else(Task::none);
             }
-            TaskRow::Edit => {
+            Err(Follow::Edit) => {
                 return self
                     .open_task_form(line)
                     .unwrap_or_else(|| self.blocked("A task cannot go on this line").task);
@@ -873,6 +909,38 @@ mod tests {
         let dated = menu("- [ ] a 📅 2026-12-01", MenuKind::Task);
         assert_eq!(dated[4].label, "Change due date…");
         assert_eq!(dated[5].glyph.as_deref(), Some("⏫"), "no priority yet");
+    }
+
+    #[test]
+    fn a_row_writes_its_change_or_says_what_it_opens() {
+        assert_eq!(TaskRow::Status('/').act(), Ok(Change::SetStatus('/')));
+        assert_eq!(
+            TaskRow::Priority(Some(Priority::Low)).act(),
+            Ok(Change::SetPriority(Some(Priority::Low)))
+        );
+        assert_eq!(TaskRow::Priority(None).act(), Ok(Change::SetPriority(None)));
+        assert_eq!(TaskRow::Due.act(), Err(Follow::Due));
+        assert_eq!(TaskRow::PriorityMenu.act(), Err(Follow::PriorityMenu));
+        assert_eq!(TaskRow::Edit.act(), Err(Follow::Edit));
+    }
+
+    #[test]
+    fn a_rows_line_reads_alone_nested_or_not() {
+        for line in [
+            "- [/] Call 🔽 📅 2026-12-01",
+            "    - [/] Call 🔽 📅 2026-12-01",
+            "\t1. [/] Call 🔽 📅 2026-12-01",
+        ] {
+            let task = row_task(line).unwrap_or_else(|| panic!("{line:?}"));
+            assert_eq!(task.task().symbol, '/', "{line:?}");
+            assert_eq!(
+                task.priority().map(|token| token.level),
+                Some(Priority::Low)
+            );
+            assert!(task.due().is_some(), "{line:?}");
+        }
+        assert!(row_task("plain text").is_none());
+        assert!(row_task("- not a task").is_none());
     }
 
     #[test]

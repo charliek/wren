@@ -42,6 +42,13 @@
 //! sees input of its own ([`wren_editor::EditorView::hand_back`]): a
 //! composition begun in the form is never the note's. Closed with none
 //! composing, what one commits next (the emoji picker's) is the note's.
+//!
+//! It also opens for a row of the task view ([`Target::Row`]): it reads
+//! the task from the row's line, and Save writes the fields changed
+//! through the one path every write from the view takes
+//! (`App::write_task_row`, `task_target.rs`), which refuses, the form
+//! staying open with why, once the task no longer reads as the row has
+//! it. It closes, writing nothing, once the view has gone.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -57,8 +64,10 @@ use wren_markdown::date::Parsed;
 use wren_markdown::status::{StatusType, STATUSES};
 use wren_markdown::task::{self, DateField, Form, FormKind, Priority};
 
+use super::board::Surface;
 use super::calendar::{place, Event as CalendarEvent, FIELD as CALENDAR_FIELD};
 use super::commands::{CommandId, Disposition, Gateway};
+use super::task_target::{RowChange, RowTarget};
 use super::{App, Message};
 use crate::date_field::FieldEvent;
 use crate::form_keys::{self, FormKey, Slot as KeySlot, SlotKind};
@@ -232,16 +241,11 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub(super) struct Open {
     pub(super) form: Form,
-    /// The note it was opened over, and its text's revision then: any
-    /// change to the text since (a reload from disk, say) refuses Save,
-    /// for the same line at the same place may be another task now.
-    note: Option<NoteId>,
-    revision: u64,
+    /// The task Save writes to.
+    target: Target,
     /// Where the task is, as the header says it.
     place: String,
     pub(super) focus: Slot,
-    /// The engine the note was in.
-    engine: wren_editor::BackendKind,
     /// The calendar gave the due field back the keyboard, and the field
     /// has seen no input of its own since: see `FormKeys::handback`.
     pub(super) due_handback: bool,
@@ -269,6 +273,27 @@ pub(super) struct Open {
     /// How many times they were found.
     #[cfg(test)]
     found: std::cell::Cell<usize>,
+}
+
+/// The task the form writes to.
+#[derive(Debug, Clone)]
+enum Target {
+    /// A line of the note in the editor.
+    Editor {
+        /// The note it was opened over, and its text's revision then: any
+        /// change to the text since (a reload from disk, say) refuses
+        /// Save, for the same line at the same place may be another task
+        /// now.
+        note: Option<NoteId>,
+        revision: u64,
+        /// The engine the note was in.
+        engine: wren_editor::BackendKind,
+    },
+    /// A row of the task view.
+    // The task view's keys and menus open it (the client of item 10.4 of
+    // discovery/tasks-build.md); until then only the tests do.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Row(RowTarget),
 }
 
 /// What the owners the form suggests were found for.
@@ -430,17 +455,63 @@ impl App {
             self.editor.hand_back();
         }
         self.column = super::columns::Column::Editor;
-        let place = format!("{} · line {}", self.task_form_note(), form.line() + 1);
+        let place = format!(
+            "{} · line {}",
+            self.task_form_note(self.selected_note),
+            form.line() + 1
+        );
+        let target = Target::Editor {
+            note: self.selected_note,
+            revision: self.editor.revision(),
+            engine: self.editor.backend(),
+        };
+        Some(self.show_task_form(form, target, place))
+    }
+
+    /// Open the form for the task of a row of the task view, read from the
+    /// row's line, and give its description field the keyboard. `None`
+    /// with no task view showing, or where the line reads as no task.
+    // The task view's keys and menus open it (the client of item 10.4 of
+    // discovery/tasks-build.md); until then only the tests do.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn open_row_task_form(&mut self, target: RowTarget) -> Option<Task<Message>> {
+        if !self.preferences.tasks || self.dialog.is_some() || self.surface() != Surface::Tasks {
+            return None;
+        }
+        // A nested task's line read alone would be indented code: the
+        // form reads it without what indents it, and Save plans its change
+        // on the note's own line.
+        let options = wren_markdown::Options {
+            tasks: Some(wren_markdown::TaskOptions {
+                today: self.today(),
+            }),
+            ..wren_markdown::Options::default()
+        };
+        let form = Form::open(&[target.expect.trim_start()], 0, &options)
+            .filter(|form| form.kind() == FormKind::Edit)?;
+        self.palette = None;
+        // A calendar over the row closes for it, writing nothing.
+        self.calendar = None;
+        self.column = super::columns::Column::Editor;
+        let place = format!(
+            "{} · line {}",
+            self.task_form_note(Some(target.note)),
+            target.line + 1
+        );
+        Some(self.show_task_form(form, Target::Row(target), place))
+    }
+
+    /// Show `form` for `target`, and give its description field the
+    /// keyboard.
+    fn show_task_form(&mut self, form: Form, target: Target, place: String) -> Task<Message> {
         // Claims a form before it left and the app never heard of are no
         // one's now.
         FORM_CLAIMS.store(0, Ordering::Relaxed);
         self.task_form = Some(Open {
             form,
-            note: self.selected_note,
-            revision: self.editor.revision(),
+            target,
             place,
             focus: Slot::Description,
-            engine: self.editor.backend(),
             due_handback: false,
             composing: false,
             calendar_composing: false,
@@ -452,12 +523,12 @@ impl App {
             #[cfg(test)]
             found: std::cell::Cell::new(0),
         });
-        Some(iced::widget::operation::focus(DESCRIPTION))
+        iced::widget::operation::focus(DESCRIPTION)
     }
 
-    /// The note the form is over, as its header names it.
-    fn task_form_note(&self) -> String {
-        let note = self.selected_note.and_then(|note| {
+    /// The note the form is for, as its header names it.
+    fn task_form_note(&self, note: Option<NoteId>) -> String {
+        let note = note.and_then(|note| {
             self.model()?
                 .notes
                 .iter()
@@ -485,7 +556,9 @@ impl App {
     /// none composing, what one commits next is the note's.
     fn take_task_form(&mut self) -> Option<Open> {
         let open = self.task_form.take()?;
-        if open.composing || open.calendar_composing || open.due_handback {
+        // A row's form was never over the note's text.
+        let editor = matches!(open.target, Target::Editor { .. });
+        if editor && (open.composing || open.calendar_composing || open.due_handback) {
             self.editor.hand_back();
         }
         Some(open)
@@ -858,6 +931,10 @@ impl App {
             }
             return self.blocked(warning).task;
         }
+        if let Some(Target::Row(target)) = self.task_form.as_ref().map(|open| &open.target) {
+            let target = target.clone();
+            return self.save_row_task_form(&target);
+        }
         let open = self.take_task_form().expect("open");
         let focus = self.return_to_editor();
         let started = std::time::Instant::now();
@@ -877,20 +954,59 @@ impl App {
         }
     }
 
+    /// Save over a row of the task view: the fields changed, written to
+    /// the row's task through [`App::write_task_row`]. Refused, the form
+    /// stays open with why.
+    fn save_row_task_form(&mut self, target: &RowTarget) -> Task<Message> {
+        let Some(open) = &self.task_form else {
+            return Task::none();
+        };
+        let change = match open.form.change() {
+            Ok(change) => change,
+            Err(problem) => return self.blocked(problem.to_string()).task,
+        };
+        let written = self.write_task_row(target, &RowChange::Change(change));
+        if let Err(refusal) = &written.result {
+            if let Some(open) = &mut self.task_form {
+                open.error = Some(refusal.message.clone());
+            }
+            return written.gateway.task;
+        }
+        self.take_task_form();
+        let focus = self.return_to_editor();
+        Task::batch([focus, written.gateway.task])
+    }
+
     /// Whether what the form was opened for has gone, or the note's text
     /// changed at all: a line that reads as it did may be another task's
-    /// (the first of two equal lines deleted), so no edit is mapped.
+    /// (the first of two equal lines deleted), so no edit is mapped. Over
+    /// a row, whether the task view has gone: a row's task that changed is
+    /// the write's to refuse.
     fn task_form_stale(&self) -> bool {
         let Some(open) = &self.task_form else {
             return true;
         };
-        !self.task_form_takes_keys()
-            || self.selected_note != open.note
-            || self.editor.backend() != open.engine
-            || self.editor.revision() != open.revision
-            || !self
-                .editor
-                .read_markdown(|lines, options| open.form.holds(lines, options))
+        match &open.target {
+            Target::Editor {
+                note,
+                revision,
+                engine,
+            } => {
+                !self.task_form_takes_keys()
+                    || self.selected_note != *note
+                    || self.editor.backend() != *engine
+                    || self.editor.revision() != *revision
+                    || !self
+                        .editor
+                        .read_markdown(|lines, options| open.form.holds(lines, options))
+            }
+            Target::Row(_) => !self.task_form_over_rows(),
+        }
+    }
+
+    /// Whether a form over a row of the task view still has its view.
+    fn task_form_over_rows(&self) -> bool {
+        self.preferences.tasks && self.loading.is_none() && self.surface() == Surface::Tasks
     }
 
     /// Write the form's change to its task as one line edit.
@@ -948,6 +1064,7 @@ impl App {
     pub(super) fn sync_task_form(&mut self) -> Task<Message> {
         let today = self.today();
         let takes_keys = self.task_form_takes_keys();
+        let over_rows = self.task_form_over_rows();
         let note = self.selected_note;
         let taken = self.palette.is_some() || self.dialog.is_some();
         let engine = self.editor.backend();
@@ -958,8 +1075,16 @@ impl App {
         if let Some(model) = &mut open.calendar {
             model.set_today(today);
         }
-        // Another engine is another editor: what the form read is gone.
-        if takes_keys && open.note == note && open.engine == engine && !taken {
+        let held = match &open.target {
+            // Another engine is another editor: what the form read is gone.
+            Target::Editor {
+                note: on,
+                engine: shown,
+                ..
+            } => takes_keys && *on == note && *shown == engine,
+            Target::Row(_) => over_rows,
+        };
+        if held && !taken {
             return Task::none();
         }
         self.take_task_form();
