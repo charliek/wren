@@ -31,6 +31,8 @@ With `tasks = off`, task lines are plain Markdown checkboxes again:
   as plain Markdown.
 - No task command is listed, its keys do nothing, and a `keybind` line
   that names one is skipped with a warning.
+- There is no [summary view](#the-summary-view), no count in a column
+  header, and no `.wren/tasks.toml`.
 
 `tasks-suggest = off` turns off only the [suggestions](#suggestions) while
 typing. It applies when the settings reload.
@@ -256,7 +258,7 @@ lacks. Two rules open the list:
 
 Suggestions use these words only: `+3d` and ISO dates are typed in the
 calendar or the form. Owners come from the task lines of every Markdown
-note in the workspace. Owners are compared without regard to case (Unicode case
+note in the workspace, as the task index holds them. Owners are compared without regard to case (Unicode case
 folding, so `@µ` and `@μ` are one owner) and offered in their most common
 spelling. They are ranked by the notes they appear in, each note counting
 less the longer ago it changed (half as much after 30 days), so this week's
@@ -299,6 +301,226 @@ was open (it was reloaded from disk, say). The due field
 takes the [date words](#date-words) and opens the calendar under it. See
 [The task form](../getting-started/keybindings.md#the-task-form) for its
 keys.
+
+## The summary view
+
+The summary view lists the tasks of a workspace, section, group or note in
+the editor pane, and changes them where they are written. It is a view, not
+a note: no file stands behind it, it never becomes the open document, and
+the note under it keeps its draft, caret and undo history. Everything it
+does is written into the notes as plain text, as the editor does.
+
+### Opening it
+
+- **A count in a column header.** Each column's header counts the open and
+  doing tasks of what the column belongs to: Sections the workspace, Groups
+  the section, Notes the group. The number is red while one of them is
+  overdue. A click opens the view of that scope, and the count looks
+  pressed while that view shows.
+- **Show tasks** (⇧⌘T on macOS, Mod+Shift+T on Linux, `tasks.show`, or
+  **Show tasks** in the palette). It opens the view of where the keyboard
+  is: from the Sections column the selected section, from the Groups column
+  the selected group, from the Notes column the group it lists, from the
+  editor or a board the open note's group, and from the view itself the
+  same view.
+- **A row's actions.** Right-click a section, group or note in a column
+  (or open its actions from the palette) for **Show tasks in this
+  section**, **group** or **note**.
+
+Opening the view writes nothing, so it shows no message. Back and Forward
+pass through views as through notes: a view sits in the history after the
+note it was opened from. A view is never written to
+[`.wren/workspace.toml`](workspace-folder.md#wrenworkspacetoml), so the
+saved history is what the note visits alone make, and Wren reopens on the
+last note.
+
+The counts follow `task-counts` in [`config.conf`](configuration.md#settings);
+**Toggle task counts** (`view.toggle_task_counts`) in the palette flips it,
+saves it, and shows a message with Undo. The setting hides only the counts;
+the view and Show tasks stay.
+
+### What it shows
+
+The header holds the **scope chip**, for example "Tasks in Planning, group
+▾". It opens **Show tasks in**, a menu of the workspace and the section,
+group and note the view lies in (below a workspace view, the ones the tree
+has selected), with the current one checked. Under it come the filters:
+
+| Control | Choices |
+|---|---|
+| Status chips | Open, Doing, Done and Cancelled, each with its count. None pressed shows every status; a pressed chip narrows to it, and **Show all** clears them. |
+| Owner | Anyone; **Me**, the tasks with no owner or an owner named in `tasks-me`; or one `@name` from the scope's tasks. |
+| Group by | Note (the default), Due date, Priority, or Owner. |
+| Due | Any date, Overdue, Earlier, Today, This week, Next week, Later, or No date. |
+| Priority | Any priority, each level, or None. |
+| Hide done after 14 days | On by default. |
+
+- **Me.** A task with no owner is yours, so Me lists those and the tasks
+  that name a `tasks-me` owner. Set `tasks-me = sam, sam.lee` in
+  [`config.conf`](configuration.md#settings) for the names you answer to.
+  Names are compared without regard to case.
+- **Due buckets.** Weeks run Monday to Sunday. Overdue is unfinished work
+  due before today and Earlier is finished work due before today. This
+  week is after today up to Sunday, Next week the week after, and Later
+  everything beyond. A task with no due date, or one that is not a real
+  day, is in No date.
+- **Grouping.** By note, groups follow the tree's order. By due date they
+  are the buckets, by priority Highest to Lowest and No priority, and by
+  owner Me first and then each person by name. A task with several owners
+  is listed under each.
+- **Order.** Within a group, open and doing tasks come before done and
+  cancelled ones, overdue first, then by priority (a task with none ranks
+  between Medium and Low), then by due date, then in the tree's order.
+- **Hide done after 14 days.** Done and cancelled tasks whose `✅` or `❌`
+  date is more than 14 days before today leave the list. Finished work
+  with no date counts as recent.
+
+Each filter is remembered for its scope, in
+[`.wren/tasks.toml`](workspace-folder.md#wrentaskstoml), and comes back
+when you open that scope again. A scope with every filter at its default
+leaves no entry.
+
+A row has the status box, the description with its owners in the owner
+colour, the priority glyph, the due date (red and bold when overdue, a
+warning mark when it is not a real day), and under the description its
+source: the nearest heading when the list is grouped by note (or "Top of
+note"), and otherwise the group, the note and the heading. Done and
+cancelled rows are struck through and dimmed. An empty list says what to
+change to see tasks again.
+
+The footer counts the open and doing tasks and the overdue ones of the
+scope, and then says what is left out: **Left out: 1 note (2 tasks, tasks:
+off), 3 notes in hidden folders (9 tasks)**, and unreadable notes. At the
+right it shows the keys: "Space toggle · S D P · E edit · F2 rename · ↵
+open · R refresh".
+
+### Keys in the view
+
+The keys work while the view has the keyboard, which it takes when it
+opens. Tab moves between the controls and the list, and ← → between
+controls; ↵ or Space presses a control and ↓ opens a menu control's menu.
+
+| Key | Does |
+|---|---|
+| ↑ ↓ or `k` `j` | Select the previous or next row. PgUp, PgDn, Home and End move further. |
+| ↵ | Open the note at the row's line. |
+| Space, ⌘↵ / Mod+Enter | Toggle the task done, or back to open, as in the editor. ⌘↵ is the key of **Toggle a task**, so it follows a rebinding. |
+| `s` | Status menu. |
+| `d` | The calendar, to set or clear the due date. |
+| `p` | Priority menu. |
+| `+` `=` and `-` `_` | Raise and lower the priority one level. |
+| `e` | The [task form](#the-task-form) for the row. |
+| F2 | Rename the description in the row. |
+| `r` | Refresh: rows written move to where they now belong. |
+| ⌘Z / Mod+Z | Undo the last task write. |
+| Esc | Close what is open over the list. |
+
+Escape does nothing else in the view: it does not clear the filters, which
+are remembered, and it does not leave the view (Back does). In a filter's
+menu it closes the menu, and from a control it gives the keyboard back to
+the list. A key that opens a menu, the calendar or the form is the last
+input of its batch, so keys typed in the same instant are dropped, not
+applied to the row.
+
+With the mouse: a click on a box cycles the status (open, doing, done, open;
+a cancelled task reopens, and a box whose character has no status is only
+selected), a click on the priority opens the priority menu, a click on the
+due date opens the calendar, and a click on the source line opens the note
+at the task. A right-click on a row opens its **task menu**: the editor's
+task menu, plus **Open the note at this line** and **Hide tasks in** the
+note. The menu opens on "Open the note at this line", so a right-click
+then ↵ opens it. A double-click on a row's description renames it, as F2
+does.
+
+The status, priority and task menus take the same single keys as in the
+editor ([Task menus](../getting-started/keybindings.md#task-menus)), and
+hang under the row's box, or its priority.
+
+#### Renaming a description
+
+F2 on the selected row (the view's own key, whatever the keymap gives F2
+elsewhere), or a double-click on a row's description, opens a one-line
+field holding the description as written: its owners are in it and its
+tokens are not, and the caret is at the end. ↵ writes it ("Description
+changed", with Undo). Esc, or leaving the field, cancels and writes nothing.
+Tab does nothing. An empty description is refused: "A task needs a
+description; nothing was written". While the field is open the view's
+toggle and undo keys do nothing.
+
+### Writing to notes
+
+Every change from the view is written into the note, and the note's file
+stays the one place the task lives.
+
+- **An open note** is changed through its editor, as one undo step, so its
+  caret, scroll position and undo history stay. The editor remains the
+  only writer of the open note.
+- **A closed note** is read, changed on the task's line and written back in
+  place, after the open note's draft is saved. No conflict copy is made for
+  these writes.
+- **A row that is out of date** is refused. Wren looks for the task at the
+  row's line, then for the one line anywhere in the note that reads the
+  same. If it finds none, or cannot tell two apart, or the file changed
+  while it wrote, nothing is written, the list is read again, and the
+  message says "This task changed; the list was refreshed".
+
+Every write shows a message under the list: what changed and where, for
+example "Done · wrote line 12 of Work/Planning/Roadmap.md", with **Undo**.
+It stays six seconds and the next message replaces it. A refusal is said in
+the message, with no Undo. Undo, from the message or from ⌘Z / Mod+Z, puts
+the line back through the same path and with the same check: if the task
+has changed since, it is refused and forgotten. Undo is Wren's own stack of
+the writes made from the view and the hide actions, a hundred deep, and
+holds until you leave the workspace. In the open note it is one more step of
+the editor's history, not a step back in it.
+
+**Rows stay where they are** until you press `r`, change a filter or the
+scope, or leave the view. A task marked done under the Open chip stays in
+the list, struck through, rather than vanishing under your cursor. A task
+that moves to another line is followed, and a held row is let go when its
+line is gone or appears twice.
+
+### Hiding tasks
+
+Some notes hold tasks that are not yours to track: templates, checklists,
+a grocery list. Three layers leave them out of the counts and the view:
+
+- **A note.** `tasks: off` in its front matter hides its tasks. Wren also
+  honours Obsidian's `TP_ignore_this_file: true`. `tasks: false` and
+  `tasks: no` hide too; any other value hides nothing, and the last
+  occurrence of a key decides.
+  **Hide tasks in this note** (`note.hide_tasks`, a note's actions in the
+  Notes column, and the task menu in the view) writes the line, creating the
+  front matter if there is none, and shows the note's tasks again when it
+  is already hidden (**Show tasks in this note again**). The note's row
+  carries a muted "tasks off" mark.
+- **A group.** **Hide tasks from this group** (`group.hide_tasks`, a group's
+  actions) adds it to `exclude` in `.wren/tasks.toml`, which a folder
+  without front matter needs, and **Show this group's tasks again** takes it
+  out. A group is marked "hidden". When its section also hides it, the group
+  offers **Remove this group's own exclusion** and says the section still
+  hides it.
+- **A filter**, the last one: Hide done after 14 days, above.
+
+Each action leaves a message with Undo. Hidden notes and groups are left
+out of the counts and the view and named under "Left out", while their
+tasks stay in the workspace index so that owner suggestions still read
+them.
+
+Wren changes a note's front matter only when that is unambiguous, because
+front matter is another program's too. It refuses, and says to edit the
+note, when the block has a line that is not a plain key (a quoted key, a
+flow mapping, a merge: any might be `tasks`), when `tasks` is a list, when
+the note begins with `---` and closes it further down without being front
+matter as Wren reads it, when `TP_ignore_this_file` is what hides the note
+(Show is refused, because that line is not Wren's), and when removing the
+block would turn the note's own lines into front matter. Undo puts the front
+matter back as it was, with its line endings, and is refused when the note
+changed so that it would not go back as it was.
+
+Writing `.wren/tasks.toml` is all or nothing: when it cannot be written,
+nothing changes and the action is refused. With `tasks = off` the file is
+never created, read or written.
 
 ## Which engine
 

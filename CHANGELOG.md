@@ -13,6 +13,38 @@ version's section as its notes, and publishes to the apt repo. See
 
 ## [Unreleased]
 
+### Added
+
+- **The task summary view.** With tasks on, a count in each column's header
+  (open and doing tasks, red while one is overdue) and **Show tasks**
+  (⇧⌘T, Mod+Shift+T on Linux) open the tasks of a workspace, section, group
+  or note in the editor pane. Filter by status, owner (Me, or a name),
+  due date and priority, group by note, due date, priority or owner, and
+  hide done work older than 14 days; the filters are remembered for each
+  scope. Space, ⌘↵, a click on the box, menus, the calendar, the task form
+  and a rename of the description (F2) change the task in its note, open or
+  closed, with a message and Undo (⌘Z / Mod+Z); rows stay where they are
+  until you refresh. See
+  [Tasks](https://charliek.github.io/wren/reference/tasks/#the-summary-view).
+- **Hide tasks** from the summaries: **Hide tasks in this note** writes
+  `tasks: off` into its front matter (Obsidian's `TP_ignore_this_file: true`
+  is honoured too), and **Hide tasks from this group** keeps the group in
+  `.wren/tasks.toml`. Hidden notes and groups are marked, and the view says
+  what it left out.
+- `.wren/tasks.toml`, Wren's own file for the hidden groups and each view's
+  filters. It is created only when something is set, and never with
+  `tasks = off`.
+- Settings `tasks-me` (the owners who count as Me) and `task-counts` (the
+  header counts, also **Toggle task counts** in the palette).
+
+### Fixed
+
+- A workspace scan that finishes late can no longer undo what you did while
+  it ran: a failed scan keeps the open and just-changed notes, a result that
+  leaves out a note you touched is dropped and rescanned, a note found
+  deleted while a scan finished is removed, and a failed open reads the
+  note again. This fixes races in search as well as tasks.
+
 ## v0.2.2 — 2026-11-26
 
 ### Changed

@@ -68,6 +68,7 @@ focus mode.
 | Back / Forward | ⌘[ / ⌘] | Mod+[ / Mod+] | `navigation.back` / `navigation.forward` |
 | Column left / right | ⇧⌘[ / ⇧⌘] | Mod+Shift+[ / Mod+Shift+] | `navigation.column_left` / `navigation.column_right` |
 | Rename note | ⌘R | Mod+R | `note.rename` |
+| Show tasks (with `tasks = on`) | ⇧⌘T | Mod+Shift+T | `tasks.show` |
 | Toggle focus mode | ⌘Y | Mod+Y | `view.focus` |
 | Toggle collapsed columns | ⇧⌘Y | Mod+Shift+Y | `view.collapse_columns` |
 | Increase text size | ⌘+ or ⌘= | Mod++ or Mod+= | `font.increase` |
@@ -318,6 +319,43 @@ input the form takes from its batch: keys typed in the same instant after
 it are dropped, not typed into the note. While an input method is
 composing, Enter and Esc belong to it. Closing the form gives the editor
 the keyboard back with its caret where it was.
+
+### The task summary view
+
+**Show tasks** (⇧⌘T / Mod+Shift+T, `tasks.show`) opens the
+[summary view](../reference/tasks.md#the-summary-view) of where the keyboard
+is: the selected section or group in the Sections and Groups columns, the
+group listed in the Notes column, and the open note's group from the editor
+or a board. A count in a column header opens the view of its scope too. The
+view takes the keyboard when it opens; Back returns to the note.
+
+| Key | Does |
+|---|---|
+| ↑ ↓ or `k` `j` | the previous or next row; PgUp, PgDn, Home and End go further |
+| ↵ | opens the note at the row's line |
+| Space, ⌘↵ / Mod+Enter | toggles the task done or open. The second is the key of `markdown.toggle_task`, so it follows a rebinding and the Mod switch |
+| `s`, `p`, `d` | the status menu, the priority menu, the calendar |
+| `+` `=`, `-` `_` | raises or lowers the priority one level |
+| `e` | the [task form](#the-task-form) for the row |
+| F2 | renames the row's description in a one-line field; ↵ writes it, Esc cancels. This is the view's own key, whatever the keymap gives F2 elsewhere |
+| `r` | refreshes: rows written move to where they now belong |
+| ⌘Z / Mod+Z | undoes the last task write; this is `edit.undo`'s key, so it follows a rebinding |
+| Tab, ⇧Tab | the next or previous control (the scope chip, the status chips, the pickers and Hide done), and the list between them |
+| ← → | between the controls, while one has the keyboard |
+| ↵, Space, ↓ | on a control, presses it or opens its menu |
+| Esc | closes the menu, calendar or form over the list; on a control, gives the keyboard back to the list. It does not leave the view |
+
+The menus over the view take the keys of [Task menus](#task-menus); the
+scope menu takes `w` Workspace, `s` Section, `g` Group and `n` Note. A key
+that opens a menu, the calendar or the form is the last input of its batch,
+so keys typed in the same instant are dropped. While the description field
+is open, the view's toggle and undo keys do nothing.
+
+**Toggle task counts** (`view.toggle_task_counts`) has no default key. It
+hides or shows the header counts, saves `task-counts` to `config.conf`, and
+leaves a message whose Undo flips it back. **Hide tasks in this note**
+(`note.hide_tasks`) and **Hide tasks from this group** (`group.hide_tasks`)
+have no keys either; they are in the palette and on a row's actions.
 
 ### Task suggestions
 
@@ -597,6 +635,11 @@ task.priority.medium  task.priority.low  task.priority.highest
 task.priority.lowest  task.priority.none  task.priority.raise
 task.priority.lower  task.set_due  task.clear_due  task.edit
 ```
+
+The app's own task commands, also only with `tasks = on`, are `tasks.show`
+(⇧⌘T / Mod+Shift+T), `note.hide_tasks`, `group.hide_tasks` and
+`view.toggle_task_counts`; only the first has a default key. See
+[The task summary view](#the-task-summary-view).
 
 `task.set_status` and `task.set_priority` open the status and priority
 menus, and `task.set_due` the calendar, described under

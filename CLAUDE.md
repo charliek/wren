@@ -48,7 +48,9 @@ when one lands, move what users need into `docs/` and trim the note.
   date and owner colours), `tasks.rs` (the task index: a record for each
   task line, fed by `index.rs` wherever it takes a note's text, queried by
   path, and built only with tasks on), `tasks_file.rs` (the app-managed
-  `.wren/tasks.toml`: folder exclusions and each view's filters), and
+  `.wren/tasks.toml`: folder exclusions and each view's filters),
+  `task_write.rs` (the line and front-matter plans a write from outside
+  the editor makes, for `Op::EditTaskLine` and `Op::EditTaskSwitch`), and
   `owners.rs` (the `@owner`s that suggestions offer, read from the task
   index's records).
 - `crates/wren-editor/`: the Markdown editor widget, kept free of Wren
@@ -101,7 +103,14 @@ when one lands, move what users need into `docs/` and trim the note.
     text field), `app/task_form.rs` with `form_keys.rs` (the task form and
     its key wrapper), `app/tasks_view.rs` (the task view's surface in the
     editor pane, its scope, and its stops in Back and Forward history),
-    `app/tasks_harness.rs` (the `tasks.*` test requests)
+    `app/task_list.rs` (the view's list as data: filters, groups, order and
+    held rows), `app/task_list_view.rs` (its controls, rows, keys and
+    footer), `list_keys.rs` (the view's key wrapper), `app/host_menu.rs`
+    (a menu the app draws over the view), `app/task_target.rs` (the one
+    write path for a row or the open note, and undo), `app/task_rows.rs`
+    (a row's keys, clicks and writes), `app/task_entry.rs` (header counts,
+    Show tasks, the two hides and their marks), `app/notice.rs` (the
+    message with Undo), `app/tasks_harness.rs` (the `tasks.*` test requests)
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
