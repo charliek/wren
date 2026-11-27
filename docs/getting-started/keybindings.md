@@ -357,12 +357,12 @@ shortcut that takes the keyboard (the palette, a dialog) or a refused write.
 Held keys do not repeat, except the arrows. While the description field
 is open, the view's toggle and undo keys do nothing.
 
-**Toggle task counts** (`view.toggle_task_counts`) has no default key. It
+**Toggle task counts** (⇧⌘H / Mod+Shift+H, `view.toggle_task_counts`)
 hides or shows the header counts, saves `task-counts` to `config.conf` (or,
 if that cannot be written, holds the change for this session and says so),
 and leaves a message whose Undo flips it back. **Hide tasks in this note**
 (`note.hide_tasks`) and **Hide tasks from this group** (`group.hide_tasks`)
-have no keys either; they are in the palette and on a row's actions.
+have no default keys; they are in the palette and on a row's actions.
 
 ### Task suggestions
 
