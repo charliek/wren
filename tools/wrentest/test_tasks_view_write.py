@@ -350,8 +350,11 @@ def test_a_stale_description_edit_is_refused(tmp_path: Path) -> None:
         (root / B).write_text(theirs, encoding="utf-8")
         app.client.call("tasks.view", {"type": "Order tea"})
         press(app, "enter")
+        # Either Enter finds the line changed and refuses, or the watcher's
+        # rescan came first and closed the field, its task gone: nothing is
+        # written either way.
         assert disk(root, B) == theirs
-        assert message(app) == CHANGED
+        assert message(app) == CHANGED or describe(app) is None
         wait_for(lambda: "Order dinner" in descriptions(state(app)), timeout=5,
                  description="the list shows the note as it is")
 
