@@ -1182,8 +1182,14 @@ impl Session {
             Err(error) if error.is_not_found() => return Err(refresh(self)),
             Err(error) => return Err(error.to_string()),
         };
-        let source = std::str::from_utf8(&file.bytes)
-            .map_err(|_| "The note is not valid UTF-8; it was left untouched")?;
+        let Ok(source) = std::str::from_utf8(&file.bytes) else {
+            // Bytes that are no text are still the newest known of the
+            // note: both indexes give up the text they held, as a fresh
+            // read does.
+            self.index.take_read(note, &file.bytes);
+            self.record_file(note, &file);
+            return Err("The note is not valid UTF-8; it was left untouched".into());
+        };
         let (text, written) = match plan(source) {
             Ok(Planned::Write(text, written)) => (text, written),
             Ok(Planned::Kept(kept)) => {
@@ -1738,7 +1744,25 @@ impl Session {
         }
         // A result that did not find a note the owner has read or written
         // since must not take that note, and what is known of it, away:
-        // unless the owner's own last look found no file either.
+        // unless the owner's own last look found no file either. The
+        // owner looks again now, so a note deleted after it was touched
+        // does not hold back a result that is right about it.
+        let omitted: Vec<NoteId> = match &outcome {
+            Ok(scanned) if scanned.changed => (self.touched.iter())
+                .copied()
+                .filter(|note| {
+                    !self.missing.contains(note)
+                        && self.model.note(*note).is_some()
+                        && scanned.model.note(*note).is_none()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for note in omitted {
+            if self.reread(note) {
+                self.missing.insert(note);
+            }
+        }
         let omits_touched = outcome.as_ref().is_ok_and(|scanned| {
             scanned.changed
                 && (self.touched.iter()).any(|note| {

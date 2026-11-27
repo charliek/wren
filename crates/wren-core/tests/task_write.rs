@@ -330,6 +330,45 @@ fn the_open_note_a_board_and_a_note_that_is_gone_are_refused() {
 }
 
 #[test]
+fn bytes_that_are_no_text_refuse_the_write_and_take_the_notes_old_tasks_away() {
+    let root = fixture();
+    let mut session = session(root.path());
+    let list = note(&session, LIST_PATH);
+    let under = Some(rel("Work/Tasks"));
+    let counts = |session: &Session| {
+        let counts = session
+            .tasks()
+            .unwrap()
+            .counts_under(under.as_ref(), today());
+        (counts.open_and_doing, counts.overdue)
+    };
+    assert_eq!(listed(&session, LIST_PATH).len(), 2);
+    assert_eq!(counts(&session), (3, 0));
+    assert!(searched(&session, "deck", LIST_PATH));
+    // Another program leaves bytes that are no text; no scan has seen
+    // them. The toggle and the switch each read them and refuse.
+    let bytes = [b'-', b' ', 0xff, 0xfe, b'\n'];
+    write(root.path(), LIST_PATH, bytes);
+    let hide = Op::EditTaskSwitch {
+        note: list,
+        change: SwitchChange::Hide,
+    };
+    for op in [toggle(list, 2, MAIL), hide] {
+        let error = fail(&mut session, op);
+        assert!(error.message.contains("not valid UTF-8"), "{error}");
+        // What the refusal found is known at once: the old tasks, their
+        // count and their text in search are gone.
+        assert!(listed(&session, LIST_PATH).is_empty());
+        assert!(flags(&session, list).unreadable);
+        assert_eq!(counts(&session), (1, 0));
+        assert!(!searched(&session, "deck", LIST_PATH));
+        assert_eq!(session.index().content(list), None);
+        assert_eq!(session.model().note(list).unwrap().bytes, bytes.len());
+    }
+    assert_eq!(fs::read(root.path().join(LIST_PATH)).unwrap(), bytes);
+}
+
+#[test]
 fn with_tasks_off_neither_op_runs() {
     let root = fixture();
     let mut session = session_with(root.path(), SessionOptions::default());

@@ -556,10 +556,7 @@ impl Index {
         };
         match store.read(&entry.path) {
             Ok(file) => {
-                match std::str::from_utf8(&file.bytes) {
-                    Ok(text) => self.set_content(note, text, false),
-                    Err(_) => self.unavailable(note, NOT_UTF8),
-                }
+                self.take_read(note, &file.bytes);
                 Reread::Read(file)
             }
             Err(error) => {
@@ -570,6 +567,15 @@ impl Index {
                     Reread::Failed
                 }
             }
+        }
+    }
+
+    /// Takes the bytes just read of a closed note: its text, or, for bytes
+    /// that are no text, no text at all.
+    pub(crate) fn take_read(&mut self, note: NoteId, bytes: &[u8]) {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => self.set_content(note, text, false),
+            Err(_) => self.unavailable(note, NOT_UTF8),
         }
     }
 

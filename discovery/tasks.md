@@ -1,6 +1,6 @@
 # Tasks: research and proposed design
 
-Status: **discovery, design settled.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`; the design review's decisions added 2026-11-24 (§2 items 18 to 29, §3.3). Ring 0 (the editor) is built; amendments from building it are marked "As built" and listed in §6.2 (the full record is `discovery/tasks-build.md` §10). The summary view and kanban are not. The first release is the editor alone (ring 0, §12), built on shared editor primitives (§6.1). The summary view (ring 1) follows straight after it, and kanban (ring 2) is a release of its own after that. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
+Status: **discovery, design settled.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`; the design review's decisions added 2026-11-24 (§2 items 18 to 29, §3.3). Ring 0 (the editor) and ring 1 (the summary view) are built; amendments from building them are marked "As built" and listed in §6.2 (ring 0) and §9.1 (ring 1), and the full record is `discovery/tasks-build.md` §10. Kanban is not. The first release is the editor alone (ring 0, §12), built on shared editor primitives (§6.1). The summary view (ring 1) follows straight after it, and kanban (ring 2) is a release of its own after that. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
 
 ## 1. What we are building and why
 
@@ -363,6 +363,7 @@ Not proposed: dismissing a single task without changing its status. It needs tas
   - A view names its section, group or note by path. A rename or a move inside Wren carries the view along. When the item is deleted, in Wren or outside it, the view leaves history as a deleted note does, and leaves the pane if it was showing.
   - Escape does nothing in the view (it never leaves it; Back does). From a browser column, Escape gives the keyboard to the view, as it gives it to the editor over a note.
   - With `tasks = off` no view can open, and Back and Forward are the notes' alone. The note-set scope waits for multi-select in the Notes column, which does not exist yet; it is outside the first ring 1 build (`discovery/tasks-build.md` §10).
+  - The rest of what building ring 1 changed is in §9.1.
 - **Rows.** The status box, the description with its tokens shown as in the editor, the priority, the due date, the owners, and the note (with the nearest heading) it comes from.
 - **Opening it** from the columns: a count in each column header (Sections → the workspace, Groups → the section, Notes → the group), on by default and hidden with `task-counts = off`; a right-click on a row; or `tasks.show`, which from the Notes column or the editor opens the note's group (§2 item 24).
 - **Grouping:** by note (default), by due bucket (Overdue, Today, This week, Later, No date), by priority, or by owner (Me = no owner, or a name in `tasks-me`). **Sorting** within a group: open before finished, overdue first, then priority, then due date. **Filters:** status types (default: none pressed, so every status shows; a chip narrows), owner, due bucket, priority, and §7's hide-older-work, on by default (§2 item 25).
@@ -375,6 +376,36 @@ Not proposed: dismissing a single task without changing its status. It needs tas
 
   Enter, or a click on the note name, opens the note at that line.
 - **Keyboard first,** like the tree: arrows move, Space toggles, and single keys open the status menu, the calendar and the priority menu, raise or lower the priority, and open the form.
+
+### 9.1 As built (ring 1)
+
+What building ring 1 changed in §7 to §10, in one place (the dated record is `discovery/tasks-build.md` §10):
+
+- **The key.** Show tasks is `mod+shift+t`: ⇧⌘T on macOS, Ctrl+Shift+T or Alt+Shift+T on Linux by the Mod switch, replacing the Alt+Shift+T planned before that switch existed. It opens the selected section or group, the group listed or of the open note, or the view itself.
+- **Menus outside the editor.** The task menus are a pure function of a task line, so the view reuses their rows with a *task target*: the editor's line or a view's row. The view draws its menus itself (the host menu, in the calendar's overlay slots), with an instance number so a stale choice does nothing. The calendar and the form take a row target beside their editor one. The row's task menu adds "Open the note at this line" and "Hide tasks in <note>".
+- **One Escape contract.** Each plain Escape a widget takes gives one credit, and the app's copy of it takes one, through `App::take_escape_claim`, before any other routing. Innermost first: calendar, form, the view's menu, the editor's popover, then the rest. In the view Escape closes what is over the list, or gives a filter's keyboard back to the list; it never clears filters or leaves the view (Back does).
+- **The task index** lives inside the search index and is fed at the same calls. What counts as a task is what the editor's task commands accept. `tasks: off` and Obsidian's `TP_ignore_this_file: true` each hide a note, the last occurrence of a key deciding. `.wren/tasks.toml` holds `exclude` and each scope's non-default filters, is created only once something is set, and is never touched with tasks off. Late-scan races it found are fixed on the reconcile paths shared with search, so they hold with tasks off too.
+- **History** (item 10.1, the bullet in §9): the views' stops are the app's, hung after the Session's note visits, so the state file is what the notes alone write.
+- **Writing a closed note** is `Op::EditTaskLine { note, line, expect, change }`: it carries the change and plans it on the file as read. The line is found at its row's line, else as the one task line of that text; anything else, or a file that changes under the write, writes nothing, re-reads the note and says "This task changed; the list was refreshed". No conflict copy is made.
+- **Hide tasks in this note** is `Op::EditTaskSwitch`. Front matter is another program's too, so whatever is ambiguous is refused with a message to edit the note. Undo puts the block back exactly.
+- **The open note** is still written only by its editor: a row's change is applied to the editor as one undo step, after checking the file against what the Session last read.
+- **Undo** is one app stack, 100 deep, shared by the view, the message's Undo and ⌘Z / Ctrl+Z in the view, whatever wrote the change.
+- **The ways in.** Opening a view is navigation and has no Undo message (Back takes it back); the two hides and the counts' toggle show one. Hiding a group writes `.wren/tasks.toml` first, and changes nothing if it cannot.
+- **The list.**
+  - Due buckets are the prototype's seven: Overdue, Earlier, Today, This week, Next week, Later, No date. A date that is no real day counts as No date.
+  - Me is no owner or a `tasks-me` name, all in one group.
+  - Due and Priority are dropdowns; only status is chips.
+  - Tab and Shift+Tab cycle the controls and the list inside the view.
+  - Choosing another scope is a new history stop.
+  - Filters are written only when the user changes one.
+  - A finished row shows its done or cancelled date in the date cell.
+- **Rows stay put until R.** A row written keeps its place whatever the filters now say, until R, another filter or scope, or leaving the view.
+- **Keys and clicks on a row.** Space toggles; S, P and D open the status menu, the priority menu and the calendar; E opens the form; `+` and `-` raise and lower; R refreshes. A click on the box cycles, on the priority or the date opens its menu or the calendar, and a right-click opens the task menu. The form over a row is centred.
+- **The description edited in place** (item 10.5): F2 on the selected row, or a double-click on its description (the prototype's double-click opened the form; here E does). Enter writes, Escape and a click elsewhere cancel.
+- **Not built in ring 1:**
+  - Saved views. The design names them, but not what one is beyond the per-scope filters that are already remembered, so they wait for the owner.
+  - Hiding a whole section. Only groups offer "Hide tasks from this group", although §7 item 2 says "a section or group"; meanwhile a section can be excluded by editing `.wren/tasks.toml`.
+  - The note-set scope, which waits for multi-select in the Notes column.
 
 ## 10. Writing from a view
 
@@ -426,9 +457,9 @@ The first release is **ring 0 alone**: writing and displaying tasks in the edito
   - the task index (§8), which then also feeds owner completion;
   - the rollup for a scope, with status, due date and priority set from the view, the shared form, and opening at the line;
   - the write path to closed notes (§10) and the view's undo;
-  - folder exclusions, the note switch with Hide tasks in this note, and hide-older-work;
+  - folder exclusions (offered on groups; a section only by editing `.wren/tasks.toml`, §9.1), the note switch with Hide tasks in this note, and hide-older-work;
   - the column-header counts and `task-counts`;
-  - later in the ring: inline description edit and saved views.
+  - later in the ring: inline description edit (built) and saved views (deferred to the owner, §9.1).
 - **Ring 2: kanban,** a release of its own. Columns by status, sorted by priority and due date, with card editing; then saved order (`🆔`) if missed, swimlanes by priority, and owner, due-bucket and priority columns. Also "copy for Jira" (the description, owner and due date as plain text, the link back to the note left out).
 - **Ring 3:** a user-defined status table (on hold, waiting); scheduled and start dates; recurrence as its own primitive; reminders.
 

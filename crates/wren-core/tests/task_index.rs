@@ -800,6 +800,75 @@ fn a_note_found_missing_on_opening_does_not_hold_back_the_scan_that_agrees() {
 }
 
 #[test]
+fn a_touched_note_deleted_since_does_not_hold_back_the_scan_that_found_it_gone() {
+    for (tasks_on, restored) in [(false, false), (true, false), (false, true), (true, true)] {
+        let case = format!("tasks: {tasks_on}, restored: {restored}");
+        let root = fixture();
+        let mut session = either(root.path(), tasks_on);
+        session.set_background_reconcile(true);
+        let mut clock = Duration::from_secs(10);
+        let shop = note(&session, "Home/Lists/Shop.md");
+        let diary = note(&session, "Home/Lists/Diary.md");
+        let there = root.path().join("Home/Lists/Shop.md");
+        // The note is written and left while the job is out. Then another
+        // program deletes it and adds a note, and the job sees both.
+        let job = begin(&mut session, &mut clock);
+        write_and_leave(&mut session, shop, "- [ ] written since\n", diary, clock);
+        fs::remove_file(&there).unwrap();
+        write(
+            root.path(),
+            "Home/Lists/Errands.md",
+            "- [ ] post the parcel\n",
+        );
+        let result = job.run();
+        if restored {
+            fs::write(&there, "- [ ] written since\n").unwrap();
+        }
+        run_at(&mut session, Op::FinishReconcile(result), clock);
+        let errands = (session.model().notes.iter())
+            .find(|note| note.path == rel("Home/Lists/Errands.md"))
+            .map(|note| note.id);
+        if restored {
+            // The note is there again: the result is older than it, and
+            // waits for the next scan.
+            assert!(session.model().note(shop).is_some(), "{case}");
+            assert_eq!(errands, None, "{case}");
+            if tasks_on {
+                assert_eq!(
+                    listed(&session, Some("Home/Lists/Shop.md")),
+                    ["Home/Lists/Shop.md:0 written since"]
+                );
+            }
+            let job = begin(&mut session, &mut clock);
+            let result = job.run();
+            run_at(&mut session, Op::FinishReconcile(result), clock);
+            assert!(session.model().note(shop).is_some(), "{case}");
+            assert_eq!(titled(&session, "Errands").len(), 1, "{case}");
+            continue;
+        }
+        // Gone indeed: the result is merged at once, the deletion and the
+        // new note with it.
+        assert!(session.model().note(shop).is_none(), "{case}");
+        assert!(titled(&session, "Shop").is_empty(), "{case}");
+        let errands = errands.unwrap_or_else(|| panic!("the new note is listed; {case}"));
+        assert_eq!(titled(&session, "Errands"), [errands], "{case}");
+        assert_eq!(
+            session.index().content(errands),
+            Some("- [ ] post the parcel\n"),
+            "{case}"
+        );
+        if tasks_on {
+            assert_eq!(tasks(&session).flags(shop), None);
+            assert_eq!(
+                listed(&session, Some("Home")),
+                ["Home/Lists/Errands.md:0 post the parcel"]
+            );
+            assert_eq!(counts(&session, Some("Home")), (1, 0));
+        }
+    }
+}
+
+#[test]
 fn a_failed_open_takes_the_files_time_and_size_into_the_model() {
     use std::fs::{File, FileTimes};
     use std::time::SystemTime;
