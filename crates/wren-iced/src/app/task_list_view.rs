@@ -24,22 +24,27 @@
 //!   A key that opens something (a menu, the note), Escape that closes a
 //!   menu, and any press stop the rest of their batch, which was typed
 //!   before the user could see what changed: it is dropped (drop, don't
-//!   forward). Escape is read at its place in the batch; the app's own
-//!   copies of Escape and of the shortcuts, which come after the batch, are
-//!   matched one by one to the reports they copy, and each is dropped or
-//!   let through as its report was. A click on a row names the listing it
+//!   forward). Escape and the app's shortcuts are read at their place in
+//!   the batch, and a shortcut that takes the keyboard from the list (the
+//!   palette, a dialog) stops the rest of it; the app's own copies of
+//!   Escape and of the shortcuts, which come after the batch, are matched
+//!   one by one to the reports they copy, and each is dropped or let
+//!   through as its report was. A click on a row names the listing it
 //!   was drawn from, and does nothing once that listing is gone.
 //! - **The selection** survives a refresh by note, line and source line
 //!   ([`task_list::Listing::find`]), else stays at its place in the list.
+//! - **↵ opens the note** at the task as a write would find it
+//!   (`wren_core::task_write::locate`), never at a twin of its text in a
+//!   fence; with none to find, the note opens where it was and says so.
+//!   On the note already open under the view, which records no visit,
+//!   Back is still the view (`tasks_view::Trail`).
 //! - **Writes** (item 10.4, `task_rows.rs`): keys, clicks and menus on a
 //!   row change its task in its note, each with a message with Undo, and a
 //!   row written stays where it stood until R refreshes the list.
 
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
-use iced::widget::{
-    button, column, container, mouse_area, rich_text, row, scrollable, span, svg, Space,
-};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, svg, Space};
 use iced::{Element, Fill, Rectangle, Shrink, Task};
 use wren_core::fs_store::RelPath;
 use wren_core::model::ItemRef;
@@ -57,7 +62,7 @@ use super::palette::SearchTarget;
 use super::task_list::{self, Entry, GroupKey, Listing, Piece, RowKey, HEADER_HEIGHT, ROW_HEIGHT};
 use super::tasks_view::{Event, Scope};
 use super::{App, Message};
-use crate::ellipsis::ellipsis;
+use crate::ellipsis::{ellipsis, ellipsis_runs};
 use crate::list_keys::{self, list_keys, probe, Drawn, ListKey, Press};
 use crate::{chrome, fonts, theme};
 
@@ -65,6 +70,12 @@ use crate::{chrome, fonts, theme};
 pub(super) const LIST: &str = "task-list";
 /// The list's height before it is first drawn.
 const UNDRAWN_HEIGHT: f32 = 2000.0;
+/// What opening a row's note says when its task is no longer there.
+pub(super) const STALE_OPEN: &str = "This task changed since the list was built; the note is open";
+/// The space between the footer's counts and its hint.
+const FOOTER_GAP: f32 = 12.0;
+/// What separates the pieces of the footer's hint.
+const HINT_SEPARATOR: &str = " \u{b7} ";
 /// What the footer says the list's keys are.
 pub(super) const HINT: &str =
     "Space toggle \u{b7} S D P \u{b7} E edit \u{b7} F2 rename \u{b7} \u{21b5} open \u{b7} R refresh";
@@ -337,6 +348,42 @@ impl ListState {
     }
 }
 
+/// What a row's box shows: its status, or the symbol in the box when it
+/// has no status of its own (`[?]`, `[>]`), which counts as open but is
+/// shown as written (discovery/tasks.md §5.1).
+pub(super) fn box_face(record: &TaskRecord) -> Result<StatusType, char> {
+    if wren_markdown::status::status(record.symbol).name == wren_markdown::status::UNKNOWN {
+        Err(record.symbol)
+    } else {
+        Ok(record.status)
+    }
+}
+
+/// A row's box, by [`box_face`].
+fn row_box<'a>(record: &TaskRecord, colors: &wren_core::theme::Colors) -> Element<'a, Message> {
+    let symbol = match box_face(record) {
+        Ok(status) => return task_box(status, colors),
+        Err(symbol) => symbol,
+    };
+    let (edge, ink) = (colors.muted, colors.text);
+    container(
+        chrome::label(symbol.to_string(), 10, ink)
+            .font(fonts::SEMIBOLD)
+            .align_x(iced::Center),
+    )
+    .center_x(13)
+    .center_y(13)
+    .style(move |_| container::Style {
+        border: iced::Border {
+            color: theme::color(edge),
+            width: 1.3,
+            radius: 3.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
 /// A task's box, as the editor reads its status: open empty, doing with a
 /// stroke, done filled with a tick, cancelled with a dash.
 fn task_box<'a>(status: StatusType, colors: &wren_core::theme::Colors) -> Element<'a, Message> {
@@ -503,9 +550,11 @@ impl App {
             if let Some(tasks) = self.session.as_ref().and_then(|session| session.tasks()) {
                 let prefix = scope.prefix();
                 let list = &mut self.task_list;
-                let previous = &list.listing.records;
-                (list.held)
-                    .retain_mut(|hold| hold.relocate(previous.iter(), tasks.tasks_under(prefix)));
+                task_list::relocate_holds(
+                    &mut list.held,
+                    &list.listing.records,
+                    tasks.tasks_under(prefix),
+                );
             }
         }
         let Some(session) = &self.session else {
@@ -739,6 +788,14 @@ impl App {
             }
             return Task::none();
         }
+        // A held key's repeats toggle nothing and open nothing: a write or
+        // a menu at the keyboard's repeat rate is no one's choice.
+        if press.repeat && self.ignores_repeat(&press, copy.as_ref()) {
+            if let Some(copy) = copy {
+                self.task_list.copies.push_back((copy, true));
+            }
+            return Task::none();
+        }
         // Any key that reaches an open menu, a chord it holds included,
         // leaves no press after it in the batch a choice.
         if self.task_list.menu.is_some() {
@@ -770,25 +827,35 @@ impl App {
                 task
             }
             // The view's own chords (toggle and undo) act here, in their
-            // place in the batch, and their copy is spent; any other
-            // shortcut is the app's, through its copy.
+            // place in the batch, and so do the app's own shortcuts: one
+            // that takes the keyboard from the list (the palette, a
+            // dialog, another surface) stops the rest of the batch, which
+            // was typed for the list. Either way its copy is spent. A
+            // shortcut of no App command is left to the app's copy.
             Some(AppCopy::Shortcut(accel)) => {
                 let id = (self.preferences.keymap.action(&accel))
                     .and_then(super::commands::CommandId::parse);
-                match id.and_then(|id| self.task_view_shortcut(id)) {
-                    Some(task) => {
-                        self.task_list
-                            .copies
-                            .push_back((AppCopy::Shortcut(accel), true));
-                        task
-                    }
-                    None => {
-                        self.task_list
-                            .copies
-                            .push_back((AppCopy::Shortcut(accel), false));
-                        Task::none()
-                    }
+                if let Some(task) = id.and_then(|id| self.task_view_shortcut(id)) {
+                    self.task_list
+                        .copies
+                        .push_back((AppCopy::Shortcut(accel), true));
+                    return task;
                 }
+                let app = id.filter(|id| id.scope() == super::commands::Scope::App);
+                let Some(id) = app else {
+                    self.task_list
+                        .copies
+                        .push_back((AppCopy::Shortcut(accel), false));
+                    return Task::none();
+                };
+                self.task_list
+                    .copies
+                    .push_back((AppCopy::Shortcut(accel), true));
+                let task = self.run_shortcut(id);
+                if !self.task_view_has_keys() {
+                    self.task_list.stopped = true;
+                }
+                task
             }
             None => {
                 let (task, stops) = self.task_list_press(&press);
@@ -800,12 +867,58 @@ impl App {
         }
     }
 
+    /// Whether a repeat of `press`, whose copy for the app is `copy`, does
+    /// nothing: Space, Enter and the toggle chord, and every key that opens
+    /// something (S, P, D, E, F2, ↓ on a control with a menu), and on an
+    /// open menu all but its arrows.
+    fn ignores_repeat(&self, press: &Press, copy: Option<&AppCopy>) -> bool {
+        use super::task_rows::RowAct;
+        match copy {
+            Some(AppCopy::Escape) => false,
+            Some(AppCopy::Shortcut(accel)) => {
+                super::task_describe::is_describe_key(accel)
+                    || self.preferences.keymap.action(accel) == Some("markdown.toggle_task")
+            }
+            None if self.task_list.menu.is_some() => !matches!(
+                press.key,
+                Key::Named(Named::ArrowUp | Named::ArrowDown | Named::PageUp | Named::PageDown)
+            ),
+            None => {
+                matches!(press.key, Key::Named(Named::Enter | Named::Space))
+                    || matches!(
+                        RowAct::of(press),
+                        Some(
+                            RowAct::StatusMenu
+                                | RowAct::PriorityMenu
+                                | RowAct::Calendar
+                                | RowAct::Form
+                        )
+                    )
+                    || (press.key == Key::Named(Named::ArrowDown)
+                        && self.task_list.focus.is_some_and(Control::opens_menu))
+            }
+        }
+    }
+
     /// Whether the app's copy `copy` of a key the view reported is dropped.
     /// Each copy is matched to the report it copies, in order; a copy of
     /// a key the view never reported is the app's.
     pub(super) fn take_task_list_copy(&mut self, copy: &AppCopy) -> bool {
         match self.task_list.copies.front() {
             Some((front, drop)) if front == copy => {
+                let drop = *drop;
+                self.task_list.copies.pop_front();
+                drop
+            }
+            _ => false,
+        }
+    }
+
+    /// [`App::take_task_list_copy`] for the app's copy of the shortcut
+    /// `accel`, read without copying it.
+    pub(super) fn take_task_list_shortcut(&mut self, accel: &wren_core::keybind::Accel) -> bool {
+        match self.task_list.copies.front() {
+            Some((AppCopy::Shortcut(front), drop)) if front == accel => {
                 let drop = *drop;
                 self.task_list.copies.pop_front();
                 drop
@@ -1229,7 +1342,21 @@ impl App {
             query: String::new(),
             content_match: None,
         };
+        // The note already open under the view records no visit: it shows
+        // after the view as well, so Back from it is the view.
+        let open = (self.session.as_ref())
+            .and_then(|session| session.document())
+            .map(|document| document.note);
+        let under = self
+            .task_views
+            .shown_id()
+            .filter(|_| open == Some(record.note));
         let outcome = self.activate_note(target);
+        if let Some(stop) = under
+            .filter(|_| outcome.processed.disposition.committed() && self.task_view().is_none())
+        {
+            self.task_views.pass(stop);
+        }
         if !outcome.processed.disposition.committed()
             || self.selected_note != Some(record.note)
             || self.task_view().is_some()
@@ -1237,22 +1364,17 @@ impl App {
         {
             return outcome.task;
         }
-        // The line the record names, or where its text moved to when it
-        // is there once, or the nearest line there is.
-        let count = self.editor.line_count();
-        let line = if self.editor.line_text(record.line).as_deref() == Some(record.source.as_str())
-        {
-            record.line
-        } else {
-            let found: Vec<usize> = (0..count)
-                .filter(|&line| {
-                    self.editor.line_text(line).as_deref() == Some(record.source.as_str())
-                })
-                .collect();
-            match found.as_slice() {
-                [line] => *line,
-                _ => record.line.min(count.saturating_sub(1)),
-            }
+        // The task where a write would find it: on the line the record
+        // names while it is still that task, else the one task line of the
+        // same text (a twin in a fence is no task). With none, or two, the
+        // note opens where it was, and says why.
+        let text = self.editor.text();
+        let Some(line) = wren_core::task_write::locate(&text, record.line, &record.source) else {
+            self.notify(super::notice::Notice::new(vec![super::notice::Part::Text(
+                STALE_OPEN.into(),
+            )]));
+            self.column = Column::Editor;
+            return Task::batch([outcome.task, self.column_focus()]);
         };
         self.editor
             .scroll_to_line(line, wren_editor::Placement::NearTop);
@@ -1644,7 +1766,11 @@ impl App {
             let scope = self.task_view().cloned().unwrap_or(Scope::Workspace);
             container(
                 chrome::label(
-                    empty_hint(&filters, &self.task_view_label(&scope)),
+                    empty_hint(
+                        &filters,
+                        &self.task_view_label(&scope),
+                        list.listing.old_hidden > 0,
+                    ),
                     13,
                     colors.muted,
                 )
@@ -1765,22 +1891,19 @@ impl App {
         } else {
             colors.owner
         });
-        let mut spans: Vec<iced::widget::text::Span<'a, (), iced::Font>> = Vec::new();
+        let mut runs: Vec<(String, iced::Color)> = Vec::new();
         if pieces.is_empty() {
-            spans.push(span("(no description)").color(theme::color(colors.faint)));
+            runs.push(("(no description)".into(), theme::color(colors.faint)));
         }
         for piece in pieces {
-            let (content, color) = match piece {
+            runs.push(match piece {
                 Piece::Text(text) => (text.to_owned(), text_color),
                 Piece::Owner(owner) if owner.starts_with('@') => (owner.to_owned(), owner_color),
                 Piece::Owner(owner) => (format!(" @{owner}"), owner_color),
-            };
-            spans.push(span(content).color(color).strikethrough(finished));
+            });
         }
-        let description: iced::widget::text::Rich<'a, (), Message> = rich_text(spans)
-            .size(13.5)
-            .font(fonts::UI)
-            .wrapping(iced::widget::text::Wrapping::None);
+        // One line, ending in "…" when the row is too narrow for it.
+        let description = ellipsis_runs(runs, 13.5, text_color).strikethrough(finished);
         let source = source_text(record, self.note_title(record.note), by_note);
         let serial = self.task_list.serials.get();
         let generation = self.task_list.generation;
@@ -1849,7 +1972,7 @@ impl App {
         };
         let line = row![
             cell(
-                container(task_box(record.status, &colors))
+                container(row_box(record, &colors))
                     .center_x(26)
                     .center_y(ROW_HEIGHT - 4.0)
                     .into(),
@@ -1906,20 +2029,25 @@ impl App {
         probe(area, &self.task_list.drawn, Control::Row(entry)).into()
     }
 
-    /// The pane's footer under the view: its counts, what it leaves out,
-    /// and its keys.
-    pub(super) fn task_list_footer(&self, scope: &Scope) -> Element<'_, Message> {
+    /// The pane's footer under the view, `width` wide: its counts, what it
+    /// leaves out, and as much of its keys' hint as the room they leave
+    /// holds, in whole pieces from the first ([`App::task_list_hint`]).
+    /// The counts never give way; what is left out ends in "…" only when
+    /// the window is too narrow for it beside them.
+    pub(super) fn task_list_footer(&self, width: f32) -> Element<'_, Message> {
         let colors = self.definition.colors;
-        let _ = scope;
         let (counts, left) = self.task_list.footer.clone();
+        let open = format!("{} open \u{b7} ", counts.open_and_doing);
+        let overdue = format!("{} overdue", counts.overdue);
+        let left = left.map(|left| format!(" \u{b7} {left}"));
+        let label = |content: &str| self.label_widths.of(content, 11.0, fonts::UI);
+        let used = label(&open) + label(&overdue) + left.as_deref().map_or(0.0, label);
+        // The gaps either side of the space between the counts and the hint.
+        let hint = self.task_list_hint(width - used - 2.0 * FOOTER_GAP);
         let mut pieces = row![
+            chrome::label(open, 11, colors.muted),
             chrome::label(
-                format!("{} open \u{b7} ", counts.open_and_doing),
-                11,
-                colors.muted
-            ),
-            chrome::label(
-                format!("{} overdue", counts.overdue),
+                overdue,
                 11,
                 if counts.overdue > 0 {
                     colors.danger
@@ -1929,17 +2057,33 @@ impl App {
             ),
         ];
         if let Some(left) = left {
-            pieces = pieces.push(chrome::label(format!(" \u{b7} {left}"), 11, colors.muted));
+            pieces = pieces.push(ellipsis(left, 11.0, theme::color(colors.muted)).width(Shrink));
         }
-        row![
-            pieces.clip(true),
-            iced::widget::space::horizontal(),
-            chrome::label(HINT, 11, colors.faint),
-        ]
-        .spacing(12)
-        .align_y(iced::Center)
-        .clip(true)
-        .into()
+        let mut line = row![pieces.clip(true), iced::widget::space::horizontal()]
+            .spacing(FOOTER_GAP)
+            .align_y(iced::Center)
+            .clip(true);
+        if !hint.is_empty() {
+            line = line.push(chrome::label(hint, 11, colors.faint));
+        }
+        line.into()
+    }
+
+    /// The pieces of the keys' hint ([`HINT`]) that fit in `room`, whole
+    /// and from the first, with their separators; empty when not even the
+    /// first does. A word is never cut.
+    pub(super) fn task_list_hint(&self, room: f32) -> String {
+        let pieces: Vec<&str> = HINT.split(HINT_SEPARATOR).collect();
+        let widths = (pieces.iter().enumerate()).map(|(index, piece)| {
+            let gap = if index > 0 {
+                self.label_widths.of(HINT_SEPARATOR, 11.0, fonts::UI)
+            } else {
+                0.0
+            };
+            gap + self.label_widths.of(piece, 11.0, fonts::UI)
+        });
+        let shown = super::task_footer::pieces_that_fit(widths, room);
+        pieces[..shown].join(HINT_SEPARATOR)
     }
 
     /// The footer's counts for `scope`, and what it says is left out.
@@ -2007,14 +2151,20 @@ fn menu_control(purpose: &MenuFor) -> Control {
     }
 }
 
-/// What the empty list says: what to change to see tasks again.
-pub(super) fn empty_hint(filters: &TaskFilters, label: &str) -> String {
-    if !task_list::narrowed(filters) {
+/// What the empty list says: what to change to see tasks again. `old` is
+/// whether "Hide done after 14 days" hides tasks the other filters keep.
+pub(super) fn empty_hint(filters: &TaskFilters, label: &str, old: bool) -> String {
+    let old = old && filters.hide_old;
+    if !task_list::narrowed(filters) && !old {
         return format!(
             "No tasks match in {label}. Widen the scope from the menu at the top left."
         );
     }
     let mut fixes = Vec::new();
+    let unhide = format!("turn off Hide done after {} days", task_list::OLD_DAYS);
+    if old {
+        fixes.push(unhide.as_str());
+    }
     if !filters.statuses.is_empty() {
         fixes.push("press Show all");
     }
@@ -2205,6 +2355,7 @@ mod tests {
             physical: Physical::Unidentified(NativeCode::Unidentified),
             modifiers: Modifiers::empty(),
             text: text.map(str::to_owned),
+            repeat: false,
         }
     }
 
@@ -2788,6 +2939,46 @@ mod tests {
         assert_eq!(glyphs, ["\u{2713}", "", "", ""]);
     }
 
+    /// A narrow window: the footer's hint gives way in whole pieces from
+    /// its end, never a word cut, before the counts do.
+    #[test]
+    fn the_footer_hint_gives_way_in_whole_pieces() {
+        crate::fonts::load();
+        let (_directory, app) = fixture();
+        let pieces: Vec<&str> = HINT.split(HINT_SEPARATOR).collect();
+        assert_eq!(pieces.len(), 6);
+        assert_eq!(app.task_list_hint(10_000.0), HINT);
+        assert_eq!(app.task_list_hint(0.0), "");
+        assert_eq!(app.task_list_hint(-40.0), "");
+        let width = |text: &str| super::super::task_footer::label_width(text, 11.0, fonts::UI);
+        let mut room = 0.0;
+        for count in 1..=pieces.len() {
+            let gap = if count > 1 {
+                width(HINT_SEPARATOR)
+            } else {
+                0.0
+            };
+            room += gap + width(pieces[count - 1]);
+            let whole = pieces[..count].join(HINT_SEPARATOR);
+            assert_eq!(app.task_list_hint(room), whole, "{room}");
+            assert_eq!(
+                app.task_list_hint(room - 0.5),
+                pieces[..count - 1].join(HINT_SEPARATOR),
+                "{room}"
+            );
+        }
+        // Every room shows whole pieces from the first.
+        for room in (0..600).step_by(7) {
+            let shown = app.task_list_hint(room as f32);
+            assert!(
+                shown.is_empty()
+                    || (1..=pieces.len())
+                        .any(|count| shown == pieces[..count].join(HINT_SEPARATOR)),
+                "{shown:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_empty_list_says_how_to_widen_it() {
         let filters = TaskFilters {
@@ -2797,13 +2988,23 @@ mod tests {
             ..TaskFilters::default()
         };
         assert_eq!(
-            empty_hint(&filters, "Work"),
+            empty_hint(&filters, "Work", false),
             "No tasks match. Press Show all, set Owner to Anyone, set Priority to Any, or \
              widen the scope."
         );
         assert_eq!(
-            empty_hint(&TaskFilters::default(), "Work"),
+            empty_hint(&TaskFilters::default(), "Work", false),
             "No tasks match in Work. Widen the scope from the menu at the top left."
+        );
+        // Ring judge: Hide done alone hides every task.
+        assert_eq!(
+            empty_hint(&TaskFilters::default(), "Work", true),
+            "No tasks match. Turn off Hide done after 14 days, or widen the scope."
+        );
+        assert_eq!(
+            empty_hint(&filters, "Work", true),
+            "No tasks match. Turn off Hide done after 14 days, press Show all, set Owner to \
+             Anyone, set Priority to Any, or widen the scope."
         );
     }
 
@@ -2843,9 +3044,16 @@ mod tests {
     }
 
     /// Builds the list and its view for 5,000 tasks in `notes` notes of
-    /// one group, and returns how long the list took to build once, and
-    /// the view a frame.
-    fn time_list(notes: usize) -> (std::time::Duration, std::time::Duration) {
+    /// one group, and returns how long the list took to build once, the
+    /// view a frame, and the list's rebuild after a write while 100 rows
+    /// written before it are held.
+    fn time_list(
+        notes: usize,
+    ) -> (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ) {
         let directory = crate::test_support::tempdir();
         let root = directory.path().join("workspace");
         std::fs::create_dir_all(root.join("Work/Big")).unwrap();
@@ -2873,7 +3081,29 @@ mod tests {
             let view = app.view();
             std::hint::black_box(&view);
         }
-        (built, start.elapsed() / frames)
+        let frame = start.elapsed() / frames;
+        // 100 rows written without R, each held; then one more write, whose
+        // revision relocates every hold and builds the list round them.
+        let write = |app: &mut App, row: usize| {
+            let entry = app.task_list.listing.rows().nth(row).unwrap();
+            let record = app.task_list.listing.record(entry).unwrap();
+            let target = super::super::task_target::RowTarget::of(record);
+            let _ = app.write_view_row(
+                &target,
+                Some(record.box_at),
+                wren_markdown::task::Change::RaisePriority,
+                super::super::task_rows::What::Raise,
+            );
+        };
+        for row in 0..100 {
+            write(&mut app, row * 7);
+            let _ = app.update(Message::Tick);
+        }
+        assert_eq!(app.task_list.held.len(), 100);
+        write(&mut app, 4000);
+        let start = std::time::Instant::now();
+        let _ = app.sync_task_list();
+        (built, frame, start.elapsed())
     }
 
     /// The list's view builds only the rows in view: with 5,000 tasks in
@@ -2882,12 +3112,16 @@ mod tests {
     #[ignore = "a timing; run with --ignored on a quiet machine"]
     fn perf_task_list_view() {
         for notes in [1, 5000] {
-            let (built, frame) = time_list(notes);
+            let (built, frame, held) = time_list(notes);
             eprintln!(
                 "5,000 tasks in {notes} notes: list built in {built:?}, view built in \
-                 {frame:?} a frame"
+                 {frame:?} a frame, rebuilt round 100 held rows in {held:?}"
             );
             assert!(frame < std::time::Duration::from_millis(16), "{frame:?}");
+            assert!(
+                held < built * 3 + std::time::Duration::from_millis(5),
+                "{held:?}"
+            );
         }
     }
 }

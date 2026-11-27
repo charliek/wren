@@ -8,8 +8,12 @@
 //! outside the editor (`task_target.rs`), a group's exclusion, or the
 //! columns' task counts. An Undo for a task write runs only while that
 //! write is still the next to undo, so a message never undoes another
-//! write than the one it names. Undoing leaves no message of its own: what
-//! it put back shows where the action showed.
+//! write than the one it names. Undoing a task write, from here or with
+//! the view's undo key, leaves a message of its own that names what it
+//! undid and the note and line it wrote, or why it wrote nothing: the
+//! write may be in a note out of sight. A press anywhere on the message
+//! is a press outside the description field being edited, which ends it
+//! before the message's Undo or dismissal runs.
 //!
 //! The message exists only with tasks on, and is drawn in a layer of the
 //! pane that is there only then, so with tasks off the window is as it was.
@@ -74,6 +78,10 @@ pub enum Event {
     Undo(u64),
     /// A click on the message elsewhere.
     Dismiss(u64),
+    /// A mouse press anywhere on the message `serial`, before its Undo or
+    /// its dismissal: a press outside a row's description field, which
+    /// the message takes before the field could hear of it.
+    Pressed(u64),
 }
 
 impl Notice {
@@ -145,6 +153,14 @@ impl App {
 
     pub(super) fn notice_event(&mut self, event: Event) -> Task<Message> {
         match event {
+            // A press outside the description field ends its edit, writing
+            // nothing, as a press anywhere else in the window does.
+            Event::Pressed(_) => {
+                if self.cancel_describe() {
+                    return self.task_view_focus();
+                }
+                Task::none()
+            }
             Event::Undo(serial) => self.undo_notice(serial).task,
             Event::Dismiss(serial) => {
                 if self
@@ -348,6 +364,10 @@ impl<R: iced::advanced::Renderer> iced::advanced::Widget<Message, iced::Theme, R
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let over = cursor.is_over(layout.bounds());
+        if over && matches!(event, iced::Event::Mouse(mouse::Event::ButtonPressed(_))) {
+            shell.publish(Message::Notice(Event::Pressed(self.serial)));
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -362,7 +382,7 @@ impl<R: iced::advanced::Renderer> iced::advanced::Widget<Message, iced::Theme, R
             event,
             iced::Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::ButtonReleased(_))
         );
-        if button && !shell.is_event_captured() && cursor.is_over(layout.bounds()) {
+        if button && !shell.is_event_captured() && over {
             shell.capture_event();
         }
     }

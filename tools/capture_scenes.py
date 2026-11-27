@@ -39,7 +39,7 @@ priority and task menus, the calendar and the form over it, the message
 with Undo after a write, and a row held in place under the Open chip after
 it was marked done, and a row's description edited in place (item 10.5),
 its field open with text typed; the PNGs go where `--only tasks` writes
-them.
+them. `--window 1024x640` (X11 only) shoots them in a window that size.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -1724,8 +1724,8 @@ def main() -> int:
                         help="with --only tasks, name the font setup in the output path "
                              "(default: whether Noto Color Emoji is installed)")
     parser.add_argument("--window", metavar="WIDTHxHEIGHT",
-                        help="with --only boards, resize the window first (X11 only); "
-                             "pair it with --label")
+                        help="with --only boards or task-list, resize the window first "
+                             "(X11 only); pair it with --label")
     args = parser.parse_args()
     if args.engine is None:
         args.engine = "advanced" if args.only in ("tasks", "task-list") else "classic"
@@ -1733,9 +1733,9 @@ def main() -> int:
         parser.error("--fonts goes with --only tasks")
     if args.only == "spell" and args.engine != "advanced":
         parser.error("--only spell needs --engine advanced: spell check runs on that engine only")
-    if args.window and (args.only != "boards" or sys.platform == "darwin"
+    if args.window and (args.only not in ("boards", "task-list") or sys.platform == "darwin"
                         or "x" not in args.window):
-        parser.error("--window takes WIDTHxHEIGHT, with --only boards, on X11")
+        parser.error("--window takes WIDTHxHEIGHT, with --only boards or task-list, on X11")
     settings = f"editor-engine = {args.engine}\n"
     for setting in args.setting:
         key, separator, value = setting.partition("=")
@@ -1815,6 +1815,8 @@ def main() -> int:
             with WrenApp(workspace=workspace, evaluation=False,
                          settings=settings + "tasks = on\n" + TASK_LIST_SETTINGS,
                          today=TASKS_TODAY) as app:
+                if args.window:
+                    window_size(app, args.window)
                 app.client.call("theme.set", {"id": args.theme})
                 wait_for(lambda: app.client.call("session.get")["notes"], timeout=10)
                 banner = app.client.call("session.get")["banner"]

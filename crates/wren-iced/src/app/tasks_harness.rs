@@ -646,6 +646,7 @@ impl App {
             physical,
             modifiers,
             text: text.filter(|_| !(modifiers.control() || modifiers.alt() || modifiers.logo())),
+            repeat: false,
         };
         let passes = press.is_shortcut() || press.is_plain_escape();
         let listed = self.update(Message::TaskView(super::tasks_view::Event::Key(
@@ -1062,7 +1063,11 @@ impl App {
             "left_out": left_out,
             "hint": super::task_list_view::HINT,
             "empty": listing.entries.is_empty().then(|| {
-                super::task_list_view::empty_hint(&filters, &self.task_view_label(scope))
+                super::task_list_view::empty_hint(
+                    &filters,
+                    &self.task_view_label(scope),
+                    listing.old_hidden > 0,
+                )
             }),
             "focus": list.focus.map_or_else(|| "list".to_owned(), Control::name),
             "menu": menu,

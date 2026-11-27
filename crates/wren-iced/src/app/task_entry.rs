@@ -454,8 +454,15 @@ impl App {
                 })
             }
         };
+        // A click on the message is its press, then its release.
+        let pressed = match &message {
+            Message::Notice(
+                super::notice::Event::Undo(serial) | super::notice::Event::Dismiss(serial),
+            ) => self.update(Message::Notice(super::notice::Event::Pressed(*serial))),
+            _ => iced::Task::none(),
+        };
         let before = self.action_serial;
-        let task = self.update(message);
+        let task = iced::Task::batch([pressed, self.update(message)]);
         let mut answer = self.task_entry_snapshot();
         let processed = self
             .last_processed
@@ -1098,6 +1105,30 @@ mod tests {
                 assert_eq!(outcome.processed.disposition, Disposition::Blocked);
             }
         }
+    }
+
+    /// Ring review, astra 9: with tasks off the app's shortcuts never ask
+    /// the task view's copy queue (nor copy their key to ask it), and the
+    /// timer reads no clock for a message, there being none.
+    #[test]
+    fn with_tasks_off_a_shortcut_never_asks_the_task_views_copies() {
+        let (_directory, mut app) = fixture_with("tasks = off\nboards = on\n");
+        let palette = app
+            .preferences
+            .keymap
+            .accel("palette.commands")
+            .unwrap()
+            .clone();
+        // A stale entry the view could never have left with tasks off.
+        app.task_list.copies.push_back((
+            super::super::task_list_view::AppCopy::Shortcut(palette.clone()),
+            true,
+        ));
+        let _ = app.update(Message::Key(Input::Accel(palette)));
+        assert!(app.palette.is_some(), "the shortcut ran");
+        assert_eq!(app.task_list.copies.len(), 1, "the queue was not asked");
+        let _ = app.update(Message::Tick);
+        assert!(app.notice().is_none());
     }
 
     /// With tasks off: no count, no mark, no message, no key, and the

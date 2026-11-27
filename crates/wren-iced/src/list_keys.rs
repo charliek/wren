@@ -34,6 +34,8 @@ pub struct Press {
     pub physical: Physical,
     pub modifiers: Modifiers,
     pub text: Option<String>,
+    /// The key is held, and this press is its repeat.
+    pub repeat: bool,
 }
 
 impl Press {
@@ -154,6 +156,7 @@ where
                 physical_key,
                 modifiers,
                 text,
+                repeat,
                 ..
             }),
         ) = (self.active, event)
@@ -165,6 +168,7 @@ where
                     physical: *physical_key,
                     modifiers: *modifiers,
                     text: text.as_ref().map(ToString::to_string),
+                    repeat: *repeat,
                 };
                 let passes = press.is_shortcut() || press.is_plain_escape();
                 shell.publish((self.on_key)(ListKey {

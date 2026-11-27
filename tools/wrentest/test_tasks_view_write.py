@@ -126,14 +126,18 @@ def test_each_key_writes_with_a_message_and_undoes(tmp_path: Path) -> None:
             shown = notice(app)
             assert shown["text"] == f"{label} · wrote line 3 of {B}", keys
             assert shown["undo"] is True, shown
-            # The message's Undo, then the key again and the undo chord.
+            # The message's Undo, then the key again and the undo chord:
+            # each says what it undid, and where, with no Undo of its own.
+            undone = f"Undone: {label} · wrote line 3 of {B}"
             app.client.call("tasks.entry", {"undo": True})
             assert disk(root, B) == B_TEXT, keys
-            assert notice(app) is None
+            shown = notice(app)
+            assert (shown["text"], shown["undo"]) == (undone, False), shown
             press(app, *keys)
             assert disk(root, B) == B_TEXT.replace(LUNCH, line), keys
             press(app, "z", "mod")
             assert disk(root, B) == B_TEXT, keys
+            assert message(app) == undone, keys
         press(app, "z", "mod")
         assert message(app) == "Nothing to undo here."
         # The open note is written through its editor: its draft.

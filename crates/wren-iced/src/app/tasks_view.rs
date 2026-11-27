@@ -12,9 +12,8 @@
 //! is empty and Back and Forward are the Session's alone.
 //!
 //! This module holds the surface and its history. The list is item 10.3's,
-//! the keys and the writes item 10.4's; [`App::task_view_has_keys`],
-//! [`App::task_view_key`] and [`App::task_view_focus`] are where they take
-//! the keyboard.
+//! the keys and the writes item 10.4's; [`App::task_view_has_keys`] and
+//! [`App::task_view_focus`] are where they take the keyboard.
 
 use iced::widget::row;
 use iced::{Element, Task};
@@ -26,7 +25,6 @@ use super::board::Surface;
 use super::columns::Column;
 use super::commands::{Disposition, Gateway};
 use super::{App, Message};
-use crate::keys::Nav;
 
 /// How many stops the trail keeps, as many as the Session keeps visits.
 const MAX_STOPS: usize = 50;
@@ -35,8 +33,6 @@ const MAX_STOPS: usize = 50;
 /// which a rescan keeps; its id is the running model's alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    // Until the entry points (item 10.2) only the harness opens a view.
-    #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
     Workspace,
     Section(RelPath),
     Group(RelPath),
@@ -153,6 +149,9 @@ pub(super) enum Step {
     Show(StopId),
     /// Leave the view for the note under it, which is the next stop.
     Reveal,
+    /// Leave the view for the note under it, opened again from the view
+    /// (the stop before, going Back) or from this view (going Forward).
+    Again,
     /// The Session steps to its next note; then this stop shows over it.
     Session(Option<StopId>),
 }
@@ -185,6 +184,15 @@ pub(super) struct Trail {
     /// showed (deleted, in Wren or outside it). A view opened over no note
     /// lost none.
     lost: bool,
+    /// A stop the note of the visit the Session is on was opened again
+    /// from, with no visit of its own (the Session records none for the
+    /// note already open): that note is in history after the stop as well
+    /// as before it, so Back from it is the view and Forward from the view
+    /// is the note. Kept only while the Session stays on that visit.
+    past: Option<StopId>,
+    /// With no view shown, the note shows as it was opened again after
+    /// [`Trail::past`], not as it was before the views of its gap.
+    on_past: bool,
     serial: u64,
 }
 
@@ -200,6 +208,35 @@ impl Trail {
         self.shown.map(|index| &self.stops[index].scope)
     }
 
+    /// The stop in the pane.
+    pub(super) fn shown_id(&self) -> Option<StopId> {
+        self.shown.map(|index| self.stops[index].id)
+    }
+
+    /// The note under the stop `id` was opened again from it, recording
+    /// no visit: it shows after the stop too (see [`Trail::past`]).
+    pub(super) fn pass(&mut self, id: StopId) {
+        if self.shown.is_none() {
+            self.past = Some(id);
+            self.on_past = true;
+        }
+    }
+
+    /// Where the stop the note was opened again from is, while it is in
+    /// the gap after the visit `here`, which the Session is on.
+    fn past_index(&self, here: Option<u64>) -> Option<usize> {
+        let id = self.past?;
+        let index = self.stops.iter().position(|stop| stop.id == id)?;
+        (self.stops[index].after == here).then_some(index)
+    }
+
+    /// Leave the view for the note opened again after it.
+    fn again(&mut self) {
+        self.shown = None;
+        self.lost = false;
+        self.on_past = true;
+    }
+
     /// Open a view of `scope` from where history is, as a visit of a note
     /// is recorded: the views ahead in this gap are dropped, the notes
     /// ahead are the Session's and stay. The view already shown is not
@@ -208,18 +245,34 @@ impl Trail {
         if self.shown.is_none() {
             self.lost = false;
         }
+        let mut keeps_past = false;
         let (after, at) = match self.shown {
             Some(index) => {
                 if self.stops[index].scope == scope {
                     return;
                 }
-                (self.stops[index].after, index + 1)
+                let after = self.stops[index].after;
+                keeps_past = self.past_index(after).is_some_and(|past| past < index);
+                (after, index + 1)
             }
             None => {
                 let here = serial_at(visits, position);
-                (here, self.stops.partition_point(|stop| stop.after < here))
+                // Opened again after a view of its gap, the note has that
+                // view, and those before it, behind it.
+                let at = match self.past_index(here).filter(|_| self.on_past) {
+                    Some(index) => {
+                        keeps_past = true;
+                        index + 1
+                    }
+                    None => self.stops.partition_point(|stop| stop.after < here),
+                };
+                (here, at)
             }
         };
+        if !keeps_past {
+            self.past = None;
+        }
+        self.on_past = false;
         let ahead = self.stops[at..]
             .iter()
             .take_while(|stop| stop.after == after)
@@ -249,13 +302,16 @@ impl Trail {
                 self.lost = false;
             }
             self.shown = index;
+            self.on_past = false;
         }
         index.is_some()
     }
 
+    /// Leave the view for the note it was shown over.
     fn hide(&mut self) {
         self.shown = None;
         self.lost = false;
+        self.on_past = false;
     }
 
     /// Whether the note under the view shown was closed while it showed.
@@ -267,7 +323,11 @@ impl Trail {
     pub(super) fn step(&self, back: bool, visits: &[Visit], position: Option<usize>) -> Step {
         let same_gap =
             |index: usize, other: usize| self.stops[index].after == self.stops[other].after;
+        let past = self.past_index(serial_at(visits, position));
         match (self.shown, back) {
+            // The note opened again from the view before this one.
+            (Some(index), true) if index > 0 && past == Some(index - 1) => Step::Again,
+            (Some(index), false) if past == Some(index) => Step::Again,
             (Some(index), true) => {
                 if index > 0 && same_gap(index, index - 1) {
                     Step::Show(self.stops[index - 1].id)
@@ -291,6 +351,9 @@ impl Trail {
                 }
             }
             (None, true) => {
+                if let Some(index) = past.filter(|_| self.on_past) {
+                    return Step::Show(self.stops[index].id);
+                }
                 let Some(position) = position else {
                     return Step::End;
                 };
@@ -307,8 +370,10 @@ impl Trail {
             }
             (None, false) => {
                 let here = serial_at(visits, position);
-                // On a visit, the stops before the first visit are behind.
-                let first = self.stops.iter().find(|stop| stop.after == here);
+                // On a visit, the stops before the first visit are behind,
+                // and so are those up to the one it was opened again from.
+                let behind = past.filter(|_| self.on_past).map_or(0, |index| index + 1);
+                let first = self.stops[behind..].iter().find(|stop| stop.after == here);
                 match first {
                     Some(stop) => Step::Show(stop.id),
                     None if position.is_some_and(|position| position + 1 < visits.len()) => {
@@ -370,7 +435,12 @@ impl Trail {
                     | Op::Forward
             );
         let was_shown = self.shown.is_some();
-        self.follow_visits(mark.here, mark.newest, session.visits(), navigated);
+        // A note opened again after a view has that view behind it: a new
+        // visit drops only the views after it.
+        let behind = (self.past_index(mark.here))
+            .filter(|_| self.on_past && self.shown.is_none())
+            .map(|index| index + 1);
+        self.follow_visits(mark.here, mark.newest, session.visits(), navigated, behind);
         let tree_changed = events
             .iter()
             .any(|event| matches!(event, CoreEvent::TreeChanged));
@@ -381,6 +451,12 @@ impl Trail {
             self.lost = false;
         } else if was_shown && mark.open && session.document().is_none() {
             self.lost = true;
+        }
+        let here = serial_at(session.visits(), session.visit_position());
+        let newest = session.visits().last().map(|visit| visit.serial);
+        if here != mark.here || newest != mark.newest {
+            self.past = None;
+            self.on_past = false;
         }
         was_shown && self.shown.is_none()
     }
@@ -395,13 +471,16 @@ impl Trail {
     /// past them go with the visits the recovery dropped. A stop whose
     /// visit is gone (its note deleted, or history too long) comes after
     /// the visit before that one. `here` and `newest` are the serials of
-    /// the visit the Session was on and of its newest, before the op.
+    /// the visit the Session was on and of its newest, before the op;
+    /// `behind` ends the stops of its gap behind the note opened again
+    /// after one of them ([`Trail::past`]).
     fn follow_visits(
         &mut self,
         here: Option<u64>,
         newest: Option<u64>,
         visits: &[Visit],
         navigated: bool,
+        behind: Option<usize>,
     ) {
         let visited = visits.last().map(|visit| visit.serial) > newest;
         if let (true, false, Some(index)) = (visited, navigated, self.shown) {
@@ -418,9 +497,10 @@ impl Trail {
                 stop.after = recovered;
             }
         } else if visited {
-            let ahead = match self.shown {
-                Some(index) => index + 1,
-                None => self.stops.partition_point(|stop| stop.after < here),
+            let ahead = match (self.shown, behind) {
+                (Some(index), _) => index + 1,
+                (None, Some(behind)) => behind,
+                (None, None) => self.stops.partition_point(|stop| stop.after < here),
             };
             self.stops.truncate(ahead);
             // A view shown from before the first visit was over that
@@ -550,6 +630,11 @@ impl App {
                 let task = self.column_focus();
                 self.finish_action(Disposition::Completed, None, task)
             }
+            Step::Again => {
+                self.task_views.again();
+                let task = self.column_focus();
+                self.finish_action(Disposition::Completed, None, task)
+            }
             Step::Reveal => {
                 // The note the view was shown over is the stop before it,
                 // or the pane with no note when it was opened over none.
@@ -671,22 +756,14 @@ impl App {
             && self.task_form.is_none()
     }
 
-    /// Give the keyboard to the task view. Until the list is a widget that
-    /// takes keys (item 10.3), that is taking it from every widget, so
-    /// keys reach the app's own handling and [`App::task_view_key`].
+    /// Give the keyboard to the task view: taking it from every widget, so
+    /// the list's key wrapper (`crate::list_keys`) hears every key.
     pub(super) fn task_view_focus(&self) -> Task<Message> {
         // A row's description edited in place keeps it in its field.
         if self.task_list.describe.is_some() {
             return iced::widget::operation::focus(super::task_describe::FIELD);
         }
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
-    }
-
-    /// A navigation key while the task view has the keyboard. The list's
-    /// keys are read here (items 10.3 and 10.4); until then none does
-    /// anything.
-    pub(super) fn task_view_key(&mut self, _key: Nav) -> Task<Message> {
-        Task::none()
     }
 
     pub(super) fn task_view_event(&mut self, event: Event) -> Task<Message> {
@@ -716,17 +793,6 @@ impl App {
         .clip(true)
         .into()
     }
-
-    /// The task view itself: its filters over its list
-    /// (`task_list_view`).
-    pub(super) fn task_view_body(&self, _scope: &Scope) -> Element<'_, Message> {
-        self.task_list_body()
-    }
-
-    /// The pane's footer under a task view.
-    pub(super) fn task_view_footer(&self, scope: &Scope) -> Element<'_, Message> {
-        self.task_list_footer(scope)
-    }
 }
 
 #[cfg(test)]
@@ -744,7 +810,7 @@ mod tests {
     use super::super::palette::Mode;
     use super::super::Options;
     use super::*;
-    use crate::keys::Input;
+    use crate::keys::{Input, Nav};
 
     fn visits(serials: &[u64]) -> Vec<Visit> {
         serials
@@ -890,7 +956,7 @@ mod tests {
         }
         trail.hide();
         // The Session drops the visit at 2 and records another.
-        trail.follow_visits(Some(1), Some(2), &visits(&[0, 1, 3]), true);
+        trail.follow_visits(Some(1), Some(2), &visits(&[0, 1, 3]), true, None);
         assert_eq!(stops(&trail), [(Some(0), "A".to_owned())]);
 
         // From a view, the views behind it and itself stay behind the new
@@ -901,7 +967,7 @@ mod tests {
         }
         let b = id(&trail, &group("B"));
         assert!(trail.show(b));
-        trail.follow_visits(Some(1), Some(2), &visits(&[0, 1, 3]), true);
+        trail.follow_visits(Some(1), Some(2), &visits(&[0, 1, 3]), true, None);
         assert_eq!(trail.shown(), None);
         assert_eq!(
             stops(&trail),
@@ -915,12 +981,12 @@ mod tests {
         // A note asked for that made no visit (the one under the view)
         // takes the pane and drops nothing.
         assert!(trail.show(b));
-        trail.follow_visits(Some(1), Some(3), &visits(&[0, 1, 3]), true);
+        trail.follow_visits(Some(1), Some(3), &visits(&[0, 1, 3]), true, None);
         assert_eq!(trail.shown(), None);
         assert_eq!(trail.stops.len(), 2);
         // An op that neither visits nor asks for a note changes nothing.
         assert!(trail.show(b));
-        trail.follow_visits(Some(1), Some(3), &visits(&[0, 1, 3]), false);
+        trail.follow_visits(Some(1), Some(3), &visits(&[0, 1, 3]), false, None);
         assert_eq!(trail.shown(), Some(&group("B")));
     }
 
@@ -933,7 +999,7 @@ mod tests {
             trail.open(group(name), &history, Some(position));
         }
         // The note of the visit at 1 is deleted.
-        trail.follow_visits(Some(2), Some(2), &visits(&[0, 2]), false);
+        trail.follow_visits(Some(2), Some(2), &visits(&[0, 2]), false, None);
         assert_eq!(
             stops(&trail),
             [
@@ -945,7 +1011,7 @@ mod tests {
         assert_eq!(trail.shown(), Some(&group("C")));
         // The first visit goes too: its views come before every visit, and
         // are reached by Back from the first that is left, over its note.
-        trail.follow_visits(Some(2), Some(2), &visits(&[2]), false);
+        trail.follow_visits(Some(2), Some(2), &visits(&[2]), false, None);
         assert_eq!(
             stops(&trail),
             [
@@ -984,7 +1050,7 @@ mod tests {
         assert_eq!(trail.step(false, &[], None), Step::Show(a));
         assert!(trail.show(a));
         // The first note visited comes after them.
-        trail.follow_visits(None, None, &visits(&[0]), true);
+        trail.follow_visits(None, None, &visits(&[0]), true, None);
         assert_eq!(trail.shown(), None);
         assert_eq!(stops(&trail), [(None, "A".to_owned())]);
         assert_eq!(trail.step(true, &visits(&[0]), Some(0)), Step::Show(a));
@@ -1022,7 +1088,7 @@ mod tests {
         // records the new one after the note under the view, and the view
         // ahead goes.
         let branched = visits(&[4, 7]);
-        trail.follow_visits(Some(4), Some(6), &branched, true);
+        trail.follow_visits(Some(4), Some(6), &branched, true, None);
         assert_eq!(trail.shown(), None);
         assert_eq!(
             stops(&trail),
@@ -1042,7 +1108,7 @@ mod tests {
         let mut trail = Trail::default();
         trail.open(group("A"), &[], None);
         trail.hide();
-        trail.follow_visits(Some(4), Some(6), &branched, true);
+        trail.follow_visits(Some(4), Some(6), &branched, true, None);
         assert_eq!(stops(&trail), [(None, "A".to_owned())]);
     }
 
@@ -1064,7 +1130,7 @@ mod tests {
         // Session dropped the visit ahead and is on the copy's. Nothing was
         // asked for, so the view stays, with its gap, over the copy.
         let recovered = visits(&[0, 1, 3]);
-        trail.follow_visits(Some(1), Some(2), &recovered, false);
+        trail.follow_visits(Some(1), Some(2), &recovered, false, None);
         assert_eq!(trail.shown(), Some(&group("B")));
         assert_eq!(
             stops(&trail),
@@ -1084,7 +1150,7 @@ mod tests {
         let mut trail = Trail::default();
         trail.open(group("A"), &history, Some(1));
         trail.hide();
-        trail.follow_visits(Some(1), Some(2), &recovered, false);
+        trail.follow_visits(Some(1), Some(2), &recovered, false, None);
         assert_eq!(trail.shown(), None);
         assert!(trail.stops.is_empty());
     }
@@ -1564,8 +1630,6 @@ mod tests {
 
     #[test]
     fn escape_and_the_navigation_keys_do_nothing_in_a_view() {
-        use crate::keys::Nav;
-
         let (_directory, mut app) = fixture();
         let list = note(&app, "List");
         assert_eq!(show(&mut app, tasks_group()), Disposition::Completed);

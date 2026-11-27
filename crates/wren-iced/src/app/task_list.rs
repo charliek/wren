@@ -17,7 +17,7 @@
 //!   then due date (none last), then the tree's order.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use wren_core::fs_store::RelPath;
 use wren_core::model::NoteId;
@@ -215,7 +215,7 @@ pub(super) struct Hold {
     pub note: NoteId,
     /// The line it is on, and the line as the view's last write left it:
     /// a task that no longer reads so is no longer held
-    /// ([`Hold::relocate`]).
+    /// ([`relocate_holds`]).
     pub line: usize,
     pub source: String,
     /// Where each of its rows stood.
@@ -234,38 +234,61 @@ pub(super) struct Place {
 
 impl Hold {
     /// Whether `record` is the task held.
+    #[cfg(feature = "smoke-test")]
     pub fn holds(&self, record: &TaskRecord) -> bool {
         record.note == self.note && record.line == self.line && record.source == self.source
     }
+}
 
-    /// Find the task held among `current` (the scope's tasks now), with
-    /// `previous` those the list was built from: on its line, or else the
-    /// one line of the note that reads as it does, when no other task read
-    /// so before (that one is another task, which the held one cannot be
-    /// told from). `false` when the task cannot be traced: the hold is let
-    /// go.
-    pub fn relocate<'a>(
-        &mut self,
-        previous: impl Iterator<Item = &'a TaskRecord>,
-        current: impl Iterator<Item = &'a TaskRecord>,
-    ) -> bool {
-        let same = |record: &&TaskRecord| record.note == self.note && record.source == self.source;
-        let found: Vec<usize> = current.filter(same).map(|record| record.line).collect();
-        if found.contains(&self.line) {
+/// Find each task `held` among `current` (the scope's tasks now), with
+/// `previous` those the list was built from: on its line, or else the one
+/// line of its note that reads as it does, when no other task read so
+/// before (that one is another task, which the held one cannot be told
+/// from). A task that cannot be traced is let go. One pass over each list,
+/// whatever the number held.
+pub(super) fn relocate_holds<'a>(
+    held: &mut Vec<Hold>,
+    previous: &'a [TaskRecord],
+    current: impl Iterator<Item = &'a TaskRecord>,
+) {
+    if held.is_empty() {
+        return;
+    }
+    type Lines<'a> = HashMap<(NoteId, &'a str), Vec<usize>>;
+    let (now, before) = {
+        let wanted: HashSet<(NoteId, &str)> = (held.iter())
+            .map(|hold| (hold.note, hold.source.as_str()))
+            .collect();
+        let gather = |records: &mut dyn Iterator<Item = &'a TaskRecord>| {
+            let mut lines: Lines<'a> = HashMap::new();
+            for record in records {
+                let key = (record.note, record.source.as_str());
+                if wanted.contains(&key) {
+                    lines.entry(key).or_default().push(record.line);
+                }
+            }
+            lines
+        };
+        let mut current = current;
+        (gather(&mut current), gather(&mut previous.iter()))
+    };
+    held.retain_mut(|hold| {
+        let key = (hold.note, hold.source.as_str());
+        let found = now.get(&key).map_or(&[][..], Vec::as_slice);
+        if found.contains(&hold.line) {
             return true;
         }
-        let others = previous
-            .filter(same)
-            .filter(|record| record.line != self.line)
+        let others = (before.get(&key).into_iter().flatten())
+            .filter(|&&line| line != hold.line)
             .count();
-        match found.as_slice() {
+        match found {
             [line] if others == 0 => {
-                self.line = *line;
+                hold.line = *line;
                 true
             }
             _ => false,
         }
-    }
+    });
 }
 
 /// A scope's tasks as a view lists them.
@@ -287,6 +310,9 @@ pub(super) struct Listing {
     /// How many tasks the filters keep, each once.
     #[cfg_attr(not(any(test, feature = "smoke-test")), allow(dead_code))]
     pub shown: usize,
+    /// How many tasks every filter keeps but "Hide done after 14 days":
+    /// what the empty list's hint names.
+    pub old_hidden: usize,
 }
 
 impl Listing {
@@ -314,10 +340,28 @@ impl Listing {
         place: &dyn Fn(&TaskRecord) -> (String, String),
         held: &[Hold],
     ) -> Self {
-        let hold_of = |record: &TaskRecord| held.iter().find(|hold| hold.holds(record));
+        let mut holds: HashMap<(NoteId, usize, &str), &Hold> = HashMap::new();
+        for hold in held {
+            holds
+                .entry((hold.note, hold.line, hold.source.as_str()))
+                .or_insert(hold);
+        }
+        let hold_of = |record: &TaskRecord| {
+            if holds.is_empty() {
+                return None;
+            }
+            holds
+                .get(&(record.note, record.line, record.source.as_str()))
+                .copied()
+        };
         let mut chip_counts = [0; 4];
         let mut owners: Vec<(String, String)> = Vec::new();
         let mut kept = Vec::new();
+        let mut old_hidden = 0;
+        let with_old = filters.hide_old.then(|| TaskFilters {
+            hide_old: false,
+            ..filters.clone()
+        });
         for (index, record) in records.iter().enumerate() {
             for owner in &record.owners {
                 let folded = fold_name(owner);
@@ -333,6 +377,10 @@ impl Listing {
             }
             if hold_of(record).is_some() || (wide && keeps(record, filters, me, today, false)) {
                 kept.push(index);
+            } else if with_old.as_ref().is_some_and(|with_old| {
+                is_old(record, today) && keeps(record, with_old, me, today, false)
+            }) {
+                old_hidden += 1;
             }
         }
         owners.sort();
@@ -357,8 +405,14 @@ impl Listing {
         for &index in &kept {
             let record = &records[index];
             if let Some(hold) = hold_of(record) {
-                for place in &hold.places {
-                    add(place.group.clone(), index, &|| place.label.clone());
+                for held in &hold.places {
+                    // A note's header is the note's as it is now (renamed
+                    // or moved inside Wren); the others say what they
+                    // gathered when the row was held.
+                    match &held.group {
+                        GroupKey::Note(_) => add(held.group.clone(), index, &|| place(record)),
+                        _ => add(held.group.clone(), index, &|| held.label.clone()),
+                    }
                 }
                 continue;
             }
@@ -460,6 +514,7 @@ impl Listing {
             chip_counts,
             owners: owners.into_iter().map(|(_, name)| name).collect(),
             shown: kept.len(),
+            old_hidden,
         }
     }
 
@@ -765,6 +820,17 @@ mod tests {
             ..TaskFilters::default()
         });
         assert_eq!(shown.shown, 13);
+        assert_eq!((all.old_hidden, shown.old_hidden), (1, 0));
+        // Only what the other filters keep counts: done work alone here.
+        let done = list(&TaskFilters {
+            statuses: vec![StatusType::Done],
+            ..TaskFilters::default()
+        });
+        let open = list(&TaskFilters {
+            statuses: vec![StatusType::Open],
+            ..TaskFilters::default()
+        });
+        assert_eq!((done.old_hidden, open.old_hidden), (1, 0));
     }
 
     #[test]

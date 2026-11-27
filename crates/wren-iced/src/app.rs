@@ -785,7 +785,11 @@ impl App {
                 if self.timer_held {
                     return Task::none();
                 }
-                self.expire_notice(Instant::now());
+                // A message exists only with tasks on: with them off no
+                // clock is read for one.
+                if self.notice.is_some() {
+                    self.expire_notice(Instant::now());
+                }
                 if self.session.is_some() {
                     let task = self.process_core(Op::Tick).task;
                     return self.spawn_reconcile(task);

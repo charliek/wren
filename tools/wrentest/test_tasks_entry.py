@@ -288,7 +288,10 @@ def test_a_notes_actions_hide_its_tasks_in_its_front_matter_with_undo(tmp_path: 
         state = entry(app, undo=True)
         assert state["disposition"] == "completed", state
         assert (root / NOTES).read_text(encoding="utf-8") == FILES[NOTES]
-        assert state["marks"]["notes"] == [] and state["notice"] is None
+        assert state["marks"]["notes"] == []
+        assert state["notice"]["text"] == (
+            f"Undone: Tasks hidden · wrote the front matter of {NOTES}")
+        assert state["notice"]["undo"] is False
 
         # The open note: through its editor, as a draft.
         run_item_action(app, "notes", LIST, "note.hide_tasks")
@@ -315,8 +318,9 @@ def test_a_notes_actions_hide_its_tasks_in_its_front_matter_with_undo(tmp_path: 
         entry(app, undo=True)
         assert entry(app)["marks"]["notes"] == [NOTES]
         assert (root / EXTRA).read_text(encoding="utf-8") == FILES[EXTRA]
-        with pytest.raises(RemoteError):
-            entry(app, undo=True)
+        # The undo's own message undoes nothing.
+        assert entry(app, undo=True)["disposition"] == "blocked"
+        assert entry(app)["marks"]["notes"] == [NOTES]
 
 
 def test_with_tasks_off_there_is_no_way_in(tmp_path: Path) -> None:

@@ -227,7 +227,8 @@ pub(super) enum Seen {
 /// write in progress has heard from the Session.
 #[derive(Debug, Default)]
 pub(super) struct Writes {
-    undo: Vec<Inverse>,
+    /// Each write's inverse, with the words that say what it did.
+    undo: Vec<(Inverse, String)>,
     pub(super) seen: Option<Seen>,
     /// How many inverses were ever recorded, which names the newest.
     recorded: u64,
@@ -242,12 +243,24 @@ pub(super) struct WriteMark {
 }
 
 impl Writes {
-    fn record(&mut self, inverse: Inverse) {
+    fn record(&mut self, inverse: Inverse, what: &str) {
         if self.undo.len() == MAX_UNDO {
             self.undo.remove(0);
         }
-        self.undo.push(inverse);
+        self.undo.push((inverse, what.to_owned()));
         self.recorded += 1;
+    }
+
+    /// Say what the newest write did, as its message says it.
+    pub(super) fn name_newest(&mut self, what: String) {
+        if let Some((_, words)) = self.undo.last_mut() {
+            *words = what;
+        }
+    }
+
+    /// What the write next to undo did.
+    pub(super) fn newest(&self) -> Option<&str> {
+        self.undo.last().map(|(_, what)| what.as_str())
     }
 
     /// The mark of the write next to undo, if there is one. A write
@@ -292,10 +305,13 @@ impl App {
         let written = self.apply_row(target, change);
         if let Ok(write) = &written.result {
             if write.changed {
-                self.task_writes.record(Inverse::Line {
-                    target: write.target(),
-                    text: write.before.clone(),
-                });
+                self.task_writes.record(
+                    Inverse::Line {
+                        target: write.target(),
+                        text: write.before.clone(),
+                    },
+                    "Task changed",
+                );
             }
         }
         written
@@ -336,11 +352,18 @@ impl App {
         let written = self.apply_switch(note, change);
         if let Ok(write) = &written.result {
             if write.changed {
-                self.task_writes.record(Inverse::Switch {
-                    note,
-                    expect: write.after.clone(),
-                    replace: write.before.clone(),
-                });
+                let what = match change {
+                    SwitchChange::Show => "Tasks shown",
+                    _ => "Tasks hidden",
+                };
+                self.task_writes.record(
+                    Inverse::Switch {
+                        note,
+                        expect: write.after.clone(),
+                        replace: write.before.clone(),
+                    },
+                    what,
+                );
             }
         }
         written
@@ -357,7 +380,12 @@ impl App {
     /// one before; an undo that could not run for another reason (the
     /// open note's draft could not be saved) is kept to try again.
     pub(super) fn undo_task_write(&mut self) -> TaskWrite<Undone> {
-        let Some(inverse) = self.task_writes.undo.last().cloned() else {
+        let Some(inverse) = self
+            .task_writes
+            .undo
+            .last()
+            .map(|(inverse, _)| inverse.clone())
+        else {
             // Not worth a banner: the key was pressed once too often.
             let refusal = Refusal::blocked("Nothing to undo");
             let gateway = self.blocked(refusal.message.clone());
@@ -946,10 +974,14 @@ mod harness {
                 let done = self.set_note_tasks_hidden(note, hidden);
                 (done.result.map(|write| switch = Some(write)), done.gateway)
             } else {
-                attempted = self.task_writes.undo.last().map(|inverse| match inverse {
-                    Inverse::Line { target, .. } => target.note,
-                    Inverse::Switch { note, .. } => *note,
-                });
+                attempted = self
+                    .task_writes
+                    .undo
+                    .last()
+                    .map(|(inverse, _)| match inverse {
+                        Inverse::Line { target, .. } => target.note,
+                        Inverse::Switch { note, .. } => *note,
+                    });
                 let done = self.undo_task_write();
                 let result = done.result.map(|undone| match undone {
                     Undone::Line(write) => row = Some(write),

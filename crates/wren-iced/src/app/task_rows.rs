@@ -10,7 +10,7 @@
 //!   (⌘Z / Ctrl+Z) undoes the last task write.
 //! - **Clicks:** the box cycles the status (open → doing → done → open,
 //!   cancelled → open), except a box whose symbol has no status of its
-//!   own, which is only selected; the priority opens the priority menu and
+//!   own, which shows that symbol and is only selected; the priority opens the priority menu and
 //!   the due date the calendar; a right-click on a row opens its task menu:
 //!   the editor's rows, then "Open the note at this line" and "Hide tasks
 //!   in <note>".
@@ -19,9 +19,13 @@
 //!   showed when they opened. The calendar and the form open over the row
 //!   with the same target (`calendar.rs`, `task_form.rs`).
 //! - **Every write** shows a message naming what changed and the note's
-//!   line, with Undo (`notice.rs`). A row whose task changed since it was
-//!   listed is refused with "This task changed; the list was refreshed",
-//!   and the list shows the note as it is now.
+//!   line, with Undo (`notice.rs`), and so does every undo ("Undone: …",
+//!   or "Nothing undone: …" with why). A row whose task changed since it
+//!   was listed is refused with "This task changed; the list was
+//!   refreshed", the list shows the note as it is now, and the rest of
+//!   the batch is dropped: it was typed for the row refused.
+//! - **A held key** repeats nothing that writes or opens: Space, the
+//!   toggle chord, Enter, S, P, D, E and F2 act once (`task_list_view.rs`).
 //! - **Rows stay put until R.** A task written keeps each of its rows in
 //!   its group and at its place there, and stays shown whatever the filters
 //!   say of it now ([`super::task_list::Hold`]), so the next key acts on the
@@ -276,12 +280,13 @@ impl App {
         match &written.result {
             Ok(write) if write.changed => {
                 self.hold_row(places, target, listed, write);
+                let label = what.label(&write.after, boxed);
                 let words = format!(
-                    "{} \u{b7} wrote line {} of {}",
-                    what.label(&write.after, boxed),
+                    "{label} \u{b7} wrote line {} of {}",
                     write.line + 1,
                     write.path.as_path().display()
                 );
+                self.task_writes.name_newest(label);
                 let notice = Notice::new(vec![Part::Text(words)]);
                 self.notify(match self.task_writes.mark() {
                     Some(mark) => notice.with_undo(Undo::TaskWrite(mark)),
@@ -289,7 +294,11 @@ impl App {
                 });
             }
             Ok(_) => {}
-            Err(refusal) => self.refused_in_view(refusal),
+            Err(refusal) => {
+                // What else its batch holds was typed for the row refused.
+                self.task_list.stopped = true;
+                self.refused_in_view(refusal);
+            }
         }
         written
     }
@@ -317,12 +326,29 @@ impl App {
 
     /// Undo the last task write and report it as the view does, for its
     /// key and for a message's Undo alike: the rows and the selection
-    /// follow what it put back, a message offering to undo it goes, and a
-    /// refusal is said in the message.
+    /// follow what it put back, and the message says what was undone and
+    /// where (the write may be in a note out of sight, or under a group
+    /// the view no longer shows), or why nothing was.
     pub(super) fn undo_and_report(&mut self) -> super::commands::Gateway {
+        let what = self
+            .task_writes
+            .newest()
+            .unwrap_or("Task changed")
+            .to_owned();
         let undone = self.undo_task_write();
         match &undone.result {
             Ok(done) => {
+                let words = match done {
+                    Undone::Line(write) => format!(
+                        "Undone: {what} \u{b7} wrote line {} of {}",
+                        write.line + 1,
+                        write.path.as_path().display()
+                    ),
+                    Undone::Switch(write) => format!(
+                        "Undone: {what} \u{b7} wrote the front matter of {}",
+                        write.path.as_path().display()
+                    ),
+                };
                 if let Undone::Line(write) = done {
                     // The hold of the line undone: on that line, else the one
                     // hold that reads as the undo found it.
@@ -344,14 +370,17 @@ impl App {
                     }
                     self.rekey_selection(write.note, write.line, write.line, &write.after);
                 }
-                if matches!(
-                    self.notice.as_ref().and_then(|shown| shown.notice.undo),
-                    Some(Undo::TaskWrite(_))
-                ) {
-                    self.notice = None;
-                }
+                self.notify(Notice::new(vec![Part::Text(words)]));
             }
-            Err(refusal) => self.refused_in_view(refusal),
+            Err(refusal) => {
+                if self.banner.as_deref() == Some(refusal.message.as_str()) {
+                    self.banner = None;
+                }
+                self.notify(Notice::new(vec![Part::Text(format!(
+                    "Nothing undone: {}",
+                    refusal.message
+                ))]));
+            }
         }
         undone.gateway
     }
@@ -734,6 +763,7 @@ mod tests {
             physical: Physical::Unidentified(NativeCode::Unidentified),
             modifiers,
             text: text.map(str::to_owned),
+            repeat: false,
         }
     }
 
@@ -917,15 +947,19 @@ mod tests {
             batch(&mut app, std::slice::from_ref(&key));
             assert_eq!(on_disk(&directory, "B"), B.replace(LUNCH, &line), "{key:?}");
             assert_eq!(notice(&app).as_deref(), Some(message), "{key:?}");
-            // The message's Undo, then the same key and ⌘Z in the view.
+            // The message's Undo, then the same key and ⌘Z in the view:
+            // each says what it undid, and where.
+            let undone = format!("Undone: {message}");
             undo_by_notice(&mut app);
             assert_eq!(on_disk(&directory, "B"), B, "{key:?}");
-            assert_eq!(notice(&app), None);
+            assert_eq!(notice(&app).as_deref(), Some(undone.as_str()));
+            assert_eq!(app.notice().unwrap().notice.undo, None);
             batch(&mut app, std::slice::from_ref(&key));
             assert_eq!(on_disk(&directory, "B"), B.replace(LUNCH, &line), "{key:?}");
             let undo = undo_key(&app);
             batch(&mut app, &[undo]);
             assert_eq!(on_disk(&directory, "B"), B, "{key:?}");
+            assert_eq!(notice(&app).as_deref(), Some(undone.as_str()));
             assert_eq!(selected_description(&app), "Order lunch");
         }
         // Undone to the bottom, ⌘Z says so.
@@ -1527,8 +1561,230 @@ mod tests {
         batch(&mut app, &[space()]);
         write_b(&directory, &B.replace("Order lunch", "Order dinner"));
         undo_by_notice(&mut app);
-        assert_eq!(notice(&app).as_deref(), Some(CHANGED));
+        let refused = format!("Nothing undone: {CHANGED}");
+        assert_eq!(notice(&app).as_deref(), Some(refused.as_str()));
         assert_eq!(app.banner, None);
+    }
+
+    /// Ring judge: a box whose symbol has no status of its own shows its
+    /// symbol (discovery/tasks.md §5.1), and a click on it only selects.
+    #[test]
+    fn an_unknown_box_shows_its_symbol_and_a_click_only_selects() {
+        use super::super::task_list_view::box_face;
+        let b = "# B\n\n- [?] Ask legal\n- [>] Move the call\n";
+        let (directory, mut app) = fixture_with("advanced", A, b);
+        let face = |app: &App, description: &str| {
+            let entry = entry(app, description);
+            box_face(app.task_list.listing.record(entry).unwrap())
+        };
+        assert_eq!(face(&app, "Ask legal"), Err('?'));
+        assert_eq!(face(&app, "Move the call"), Err('>'));
+        assert_eq!(face(&app, "Book the room"), Ok(StatusType::Open));
+        select(&mut app, "Mail the deck");
+        cell(&mut app, "Ask legal", Cell::Box);
+        assert_eq!(on_disk(&directory, "B"), b);
+        assert_eq!(selected_description(&app), "Ask legal");
+    }
+
+    /// Ring judge: ↵ on a task of the note already open under the view
+    /// records no visit, but Back from it is still the view, and Forward
+    /// from the view is the note again.
+    #[test]
+    fn back_after_opening_the_note_under_the_view_is_the_view() {
+        use super::super::board::Surface;
+        let (_directory, mut app) = fixture();
+        let step = |app: &mut App, id: CommandId| {
+            let _ = app.dispatch(Command::Run(id));
+            let _ = app.update(Message::Tick);
+            app.surface()
+        };
+        select(&mut app, "Book the room");
+        batch(
+            &mut app,
+            &[press(Key::Named(Named::Enter), Modifiers::empty(), None)],
+        );
+        assert_eq!(app.surface(), Surface::Text);
+        assert_eq!(app.selected_note, Some(note(&app, "A")));
+        assert_eq!(app.editor.cursor().position.line, 3);
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
+        assert_eq!(step(&mut app, CommandId::Forward), Surface::Text);
+        assert!(!app.can_step(false), "nothing past the note");
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
+        // Back past the view is the note it was shown over, and no further.
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Text);
+        assert!(!app.can_step(true));
+        assert_eq!(step(&mut app, CommandId::Forward), Surface::Tasks);
+        assert_eq!(step(&mut app, CommandId::Forward), Surface::Text);
+        assert_eq!(app.selected_note, Some(note(&app, "A")));
+        // Another view opened from the note opened again comes after the
+        // first: Back from it is that note, then the first view.
+        let _ = app.dispatch(Command::ShowTasks(Scope::Note(
+            RelPath::new("Work/Tasks/A.md").unwrap(),
+        )));
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.surface(), Surface::Tasks);
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Text);
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
+        let group = Scope::Group(RelPath::new("Work/Tasks").unwrap());
+        assert_eq!(app.task_view(), Some(&group));
+        // From the note opened again, another note: the view behind stays,
+        // and Back from that note is the view.
+        assert_eq!(step(&mut app, CommandId::Forward), Surface::Text);
+        let b = note(&app, "B");
+        let target = app.note_target(b);
+        let _ = app.dispatch(Command::OpenNote(target));
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.selected_note, Some(b));
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
+        assert_eq!(app.task_view(), Some(&group));
+    }
+
+    /// Ring review, astra 7: a note's group a held row keeps names the
+    /// note as it is now, renamed inside Wren since.
+    #[test]
+    fn a_held_rows_note_header_follows_a_rename() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("[x]"));
+        let b = note(&app, "B");
+        let renamed = app.process_core(wren_core::ops::Op::Rename {
+            target: wren_core::model::ItemRef::Note(b),
+            new_name: "Lunch".into(),
+        });
+        assert!(renamed.processed.disposition.committed());
+        let _ = app.update(Message::Tick);
+        let listing = &app.task_list.listing;
+        let group = (listing.groups.iter())
+            .find(|group| group.key == super::super::task_list::GroupKey::Note(b))
+            .expect("B's group, held");
+        assert_eq!(group.label, "Lunch");
+        assert!(listing.groups.iter().all(|group| group.label != "B"));
+    }
+
+    /// Ring review, astra 6: Enter opens the note at the task as a write
+    /// finds it, never at a twin of its text in a fence; with no task
+    /// left to find, the note opens where it was and the message says so.
+    #[test]
+    fn enter_opens_the_note_at_the_task_not_a_fenced_twin() {
+        let enter = || press(Key::Named(Named::Enter), Modifiers::empty(), None);
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        write_b(
+            &directory,
+            "# B\n```\n- [ ] Order lunch\n```\n\n- [ ] Order lunch\n",
+        );
+        batch(&mut app, &[enter()]);
+        assert_eq!(app.selected_note, Some(note(&app, "B")));
+        assert_eq!(app.editor.cursor().position.line, 5);
+        // Gone from the note: it opens, and says why not at the task.
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        write_b(&directory, "# B\n\nNo tasks here.\n");
+        batch(&mut app, &[enter()]);
+        assert_eq!(app.selected_note, Some(note(&app, "B")));
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some(super::super::task_list_view::STALE_OPEN)
+        );
+    }
+
+    /// Ring review, astra 2: an app shortcut runs at its place in the
+    /// list's batch. The palette's chord then Space opens the palette and
+    /// toggles nothing; its copy is spent, so it opens once.
+    #[test]
+    fn an_app_shortcut_runs_in_batch_order_and_stops_what_follows() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        let palette = chord(&app, "palette.commands", Key::Character("k".into()));
+        batch(&mut app, &[palette, space()]);
+        assert!(app.palette.is_some(), "the palette opened, once");
+        assert_eq!(on_disk(&directory, "B"), B, "Space toggled nothing");
+        assert!(app.task_list.copies.is_empty());
+        let _ = app.update(Message::Escape);
+        let _ = app.update(Message::Tick);
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("[x]"));
+    }
+
+    /// Ring judge: a held key's repeats toggle nothing and open nothing;
+    /// arrows still move.
+    #[test]
+    fn a_held_keys_repeats_toggle_and_open_nothing() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        let held = |press: Press| Press {
+            repeat: true,
+            ..press
+        };
+        batch(&mut app, &[space(), held(space())]);
+        assert!(on_disk(&directory, "B").contains("[x]"), "toggled once");
+        let toggle = toggle_key(&app);
+        batch(&mut app, &[held(toggle)]);
+        assert!(
+            on_disk(&directory, "B").contains("[x]"),
+            "the chord's repeat"
+        );
+        assert!(app.task_list.copies.is_empty(), "its copy was spent");
+        for key in ["s", "p", "d", "e"] {
+            batch(&mut app, &[held(letter(key))]);
+            assert!(app.task_list.menu.is_none(), "{key}");
+            assert!(app.calendar.is_none() && app.task_form.is_none(), "{key}");
+        }
+        let enter = press(Key::Named(Named::Enter), Modifiers::empty(), None);
+        batch(&mut app, &[held(enter)]);
+        assert_eq!(app.surface(), super::super::board::Surface::Tasks);
+        let down = press(Key::Named(Named::ArrowDown), Modifiers::empty(), None);
+        let before = app.selected_row();
+        batch(&mut app, &[held(down)]);
+        assert_ne!(app.selected_row(), before, "an arrow's repeat moves");
+    }
+
+    /// Ring judge: a refused write stops the rest of its batch, which was
+    /// typed for the row refused, not for the row the refresh selects.
+    #[test]
+    fn a_refused_write_stops_the_rest_of_its_batch() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        let theirs = B.replace("Order lunch", "Order dinner");
+        write_b(&directory, &theirs);
+        batch(&mut app, &[space(), space()]);
+        assert_eq!(on_disk(&directory, "B"), theirs);
+        assert_eq!(notice(&app).as_deref(), Some(CHANGED));
+        // The next batch acts again.
+        select(&mut app, "Order dinner");
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("- [x] Order dinner"));
+    }
+
+    /// Ring judge, sev 4: an undo from the view says what it undid and
+    /// where, even when the row it wrote is out of sight: here under a
+    /// group no longer shown.
+    #[test]
+    fn an_undo_out_of_sight_says_what_it_undid_and_where() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("[x]"));
+        // Narrow the list to open work: the done row is let go and hidden.
+        app.change_filters(|filters| filters.statuses = vec![StatusType::Open]);
+        let _ = app.update(Message::Tick);
+        let undo = undo_key(&app);
+        batch(&mut app, &[undo]);
+        assert_eq!(on_disk(&directory, "B"), B);
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some("Undone: Done · wrote line 3 of Work/Tasks/B.md")
+        );
+        // A hide of a note, undone from its message's Undo, says so too.
+        right_click(&mut app, "Order lunch");
+        choose(&mut app, "Hide tasks in");
+        undo_by_notice(&mut app);
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some("Undone: Tasks hidden · wrote the front matter of Work/Tasks/B.md")
+        );
+        assert_eq!(on_disk(&directory, "B"), B);
     }
 
     fn write_a(directory: &tempfile::TempDir, text: &str) {

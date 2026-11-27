@@ -1071,8 +1071,8 @@ impl App {
         // coming and going, and each bar keeping its layer when the other is
         // hidden. A press a browser column took still reaches the editor
         // beneath, which lets the keyboard go.
-        let document: Element<'_, Message> = if let Some(scope) = tasks {
-            layers([self.task_view_body(scope)]).into()
+        let document: Element<'_, Message> = if tasks.is_some() {
+            layers([self.task_list_body()]).into()
         } else if self.selected_note.is_none() {
             layers([editor(), opaque(empty)]).into()
         } else if self.board.is_some() && self.preferences.settings.board_toolbar {
@@ -1132,8 +1132,8 @@ impl App {
 
     /// The footer under the editor, `width` wide inside its insets.
     fn editor_footer(&self, width: f32) -> Element<'_, Message> {
-        if let Some(scope) = self.task_view() {
-            return self.task_view_footer(scope);
+        if self.task_view().is_some() {
+            return self.task_list_footer(width);
         }
         if let Some(view) = &self.board {
             return self.board_footer(view, width);

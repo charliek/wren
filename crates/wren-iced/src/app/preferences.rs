@@ -1135,7 +1135,7 @@ impl App {
         // of its stopped, or ran itself: each copy is matched to its own
         // report, before anything that opened in the batch can read it.
         if let Input::Accel(accel) = &input {
-            if self.take_task_list_copy(&super::task_list_view::AppCopy::Shortcut(accel.clone())) {
+            if self.preferences.tasks && self.take_task_list_shortcut(accel) {
                 return Task::none();
             }
         }
@@ -1210,10 +1210,11 @@ impl App {
                 if self.dialog.is_some() {
                     return Task::none();
                 }
-                // The task view in the pane has the keyboard: the key is
-                // its own, never the note's under it.
+                // The task view in the pane has the keyboard: its key
+                // wrapper read the key (`list_keys.rs`), never the note's
+                // under it.
                 if self.task_view_has_keys() {
-                    return self.task_view_key(nav);
+                    return Task::none();
                 }
                 if !self.column.is_browser() {
                     return Task::none();

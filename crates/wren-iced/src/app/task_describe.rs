@@ -175,19 +175,35 @@ impl App {
     }
 
     /// Follow the occurrence being edited into the listing just built, or
-    /// close the field, writing nothing, once it is gone from it.
+    /// close the field, writing nothing, once it is gone from it. A task
+    /// that left its line is followed only to the one line of its note
+    /// that reads as it did, and the write goes there too: the field never
+    /// shows on one line and writes another. Two such lines cannot be told
+    /// apart, and close the field.
     pub(super) fn follow_describe(&mut self) {
         let list = &mut self.task_list;
         let Some(describe) = &mut list.describe else {
             return;
         };
-        match describe.find_in(&list.listing) {
-            Some(entry) => {
-                describe.entry = entry;
-                if let Some(record) = list.listing.record(entry) {
-                    describe.key.line = record.line;
+        let key = &describe.key;
+        let same: Vec<usize> = (list.listing.records.iter())
+            .filter(|record| record.note == key.note && record.source == key.source)
+            .map(|record| record.line)
+            .collect();
+        if !same.contains(&key.line) {
+            match same.as_slice() {
+                &[line] => {
+                    describe.key.line = line;
+                    describe.target.line = line;
+                }
+                _ => {
+                    list.describe = None;
+                    return;
                 }
             }
+        }
+        match describe.find_in(&list.listing) {
+            Some(entry) => describe.entry = entry,
             None => list.describe = None,
         }
     }
@@ -435,6 +451,7 @@ mod tests {
             physical: Physical::Unidentified(NativeCode::Unidentified),
             modifiers,
             text: text.map(str::to_owned),
+            repeat: false,
         }
     }
 
@@ -1015,6 +1032,143 @@ mod tests {
         assert_eq!(
             on_disk(&directory, "B"),
             "# B\n\nIntro, longer.\n\n- [ ] Order tea\n"
+        );
+    }
+
+    /// Ring review, astra 3: a press on the message over the view is a
+    /// press outside the field, which the message takes before the field
+    /// hears of it: the edit ends before the message's own dismissal or
+    /// Undo, and an Enter after it in the batch writes nothing.
+    #[test]
+    fn a_press_on_the_message_ends_the_edit_before_a_later_enter() {
+        use iced::advanced::layout::{self, Layout};
+        use iced::advanced::widget::Tree;
+        use iced::advanced::Shell;
+        use iced::mouse::{self as pointer, Button};
+        use iced::{Event as Input, Length, Point, Rectangle, Size};
+
+        let (directory, mut app) = fixture();
+        // A message showing: a write to A's first task, and its Undo.
+        select(&mut app, "Mail the deck");
+        list_batch(&mut app, &[space()]);
+        let serial = app.notice().unwrap().serial;
+        let written = draft(&app);
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea @sam")]);
+        // The message as drawn, and a press and release on its words.
+        let mut frame: Element<'static, Message, iced::Theme, ()> =
+            super::super::notice::frame_for_tests(
+                serial,
+                iced::widget::Space::new()
+                    .width(Length::Fixed(200.0))
+                    .height(Length::Fixed(20.0))
+                    .into(),
+                Some(
+                    iced::widget::Space::new()
+                        .width(Length::Fixed(40.0))
+                        .height(Length::Fixed(16.0))
+                        .into(),
+                ),
+                wren_core::theme::DARK,
+            );
+        let limits = layout::Limits::new(Size::ZERO, Size::new(600.0, 100.0));
+        let viewport = Rectangle::new(Point::ORIGIN, Size::new(600.0, 100.0));
+        let mut tree = Tree::new(&frame);
+        let node = frame.as_widget_mut().layout(&mut tree, &(), &limits);
+        // The message's words: the frame's message, its face, its line,
+        // the line's first child.
+        let mut words = Layout::new(&node);
+        for step in [0, 0, 0, 0] {
+            words = words.children().nth(step).unwrap();
+        }
+        let at = words.bounds().center();
+        let mut send = |event: Input| {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            frame.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                pointer::Cursor::Available(at),
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+            messages
+        };
+        let mut messages = send(Input::Mouse(pointer::Event::ButtonPressed(Button::Left)));
+        messages.extend(send(Input::Mouse(pointer::Event::ButtonReleased(
+            Button::Left,
+        ))));
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [
+                    Message::Notice(super::super::notice::Event::Pressed(_)),
+                    Message::Notice(super::super::notice::Event::Dismiss(_))
+                ]
+            ),
+            "{messages:?}"
+        );
+        // The batch: the press, the release, then Enter in the field.
+        let batch = app.task_list.next_serial();
+        let instance = app.task_list.describes;
+        for message in messages {
+            let _ = app.update(message);
+        }
+        let _ = app.update(Message::TaskView(Event::Field {
+            serial: batch,
+            instance,
+            event: LineEvent::Enter,
+        }));
+        assert_eq!(field_text(&app), None);
+        assert_eq!(on_disk(&directory, "B"), B);
+        assert_eq!(draft(&app), written, "and the message undid nothing");
+    }
+
+    /// Ring review, astra 1: the field shows where it writes. A task that
+    /// moved, then a twin put where it was, leaves the twin alone; a move
+    /// to two lines at once closes the field.
+    #[test]
+    fn an_edit_writes_the_line_it_followed_its_task_to() {
+        let (directory, mut app) = fixture();
+        let b = directory.path().join("workspace/Work/Tasks/B.md");
+        let rescan = |app: &mut App, text: &str| {
+            std::fs::write(&b, text).unwrap();
+            let _ = app.process_core(wren_core::ops::Op::Reconcile);
+            let _ = app.update(Message::Tick);
+        };
+        rescan(&mut app, "# B\n\n- [ ] Order lunch\n");
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea")]);
+        // Moved down to line 5, then its twin written on line 3.
+        rescan(&mut app, "# B\n\nIntro.\n\n- [ ] Order lunch\n");
+        assert_eq!(app.task_list.describe.as_ref().unwrap().key.line, 4);
+        rescan(&mut app, "# B\n\n- [ ] Order lunch\n\n- [ ] Order lunch\n");
+        let describe = app.task_list.describe.as_ref().unwrap();
+        assert_eq!((describe.key.line, describe.target.line), (4, 4));
+        field_batch(&mut app, &[LineEvent::Enter]);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            "# B\n\n- [ ] Order lunch\n\n- [ ] Order tea\n"
+        );
+        // A move to two lines at once: no telling which, the field closes.
+        rescan(&mut app, "# B\n\n- [ ] Order lunch\n");
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order cake")]);
+        rescan(
+            &mut app,
+            "# B\n\nIntro.\n- [ ] Order lunch\n- [ ] Order lunch\n",
+        );
+        assert_eq!(field_text(&app), None);
+        field_batch(&mut app, &[LineEvent::Enter]);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            "# B\n\nIntro.\n- [ ] Order lunch\n- [ ] Order lunch\n"
         );
     }
 
