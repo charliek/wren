@@ -402,8 +402,8 @@ mod tests {
             tasks,
             [("Go", "tasks.show"), ("View", "view.toggle_task_counts")]
         );
-        // The Mac menu shows Show tasks' key, ⇧⌘T, once tasks join the
-        // keymap.
+        // The Mac menu shows Show tasks' key, ⇧⌘T, and Toggle task counts',
+        // ⇧⌘H, once tasks join the keymap.
         let scheme = keybind::Scheme::new(Platform::Mac, keybind::LinuxModifier::Ctrl);
         let (mac, warnings) = Keymap::build(
             scheme,
@@ -424,7 +424,10 @@ mod tests {
             shown(&mac, "tasks.show", Kind::Plain).as_deref(),
             Some("shift+super+t")
         );
-        assert_eq!(shown(&mac, "view.toggle_task_counts", Kind::Plain), None);
+        assert_eq!(
+            shown(&mac, "view.toggle_task_counts", Kind::Plain).as_deref(),
+            Some("shift+super+h")
+        );
     }
 
     #[test]

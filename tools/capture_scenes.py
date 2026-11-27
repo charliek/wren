@@ -412,7 +412,7 @@ def entry_scenes(client, shot_here) -> None:
     """The ways into the task view (discovery/tasks-build.md item 10.2),
     from the Emoji group, whose tasks are all due later while the rest of
     the workspace has overdue ones: the header counts (the Notes one not
-    red, the others red) and then hidden; a group's actions with the task
+    red, the others red), in the narrowest columns, and then hidden; a group's actions with the task
     rows; the Footer group hidden, with its mark and the message with Undo;
     and the open note's tasks hidden, with its "tasks off" mark. Each is
     undone, so the workspace is left as it was."""
@@ -423,6 +423,14 @@ def entry_scenes(client, shot_here) -> None:
     headers = client.call("tasks.entry")["headers"]
     assert headers["notes"]["overdue"] == 0 and headers["sections"]["overdue"] > 0, headers
     shot_here("entry-counts")
+    # Each column at its narrowest: the titles end in "…" before the counts
+    # and the + (§10, 2026-11-27).
+    widths = {"sections": (140, 176), "groups": (150, 192), "notes": (200, 256)}
+    for pane, (narrowest, _) in widths.items():
+        client.call("view.width", {"pane": pane, "width": narrowest})
+    shot_here("entry-counts-narrow")
+    for pane, (_, default) in widths.items():
+        client.call("view.width", {"pane": pane, "width": default})
     client.call("command.run", {"id": "view.toggle_task_counts"})
     client.call("tasks.entry", {"dismiss": True})
     assert client.call("tasks.entry")["counts"] is False

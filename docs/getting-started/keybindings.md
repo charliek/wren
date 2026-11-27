@@ -69,6 +69,7 @@ focus mode.
 | Column left / right | ⇧⌘[ / ⇧⌘] | Mod+Shift+[ / Mod+Shift+] | `navigation.column_left` / `navigation.column_right` |
 | Rename note | ⌘R | Mod+R | `note.rename` |
 | Show tasks (with `tasks = on`) | ⇧⌘T | Mod+Shift+T | `tasks.show` |
+| Toggle task counts (with `tasks = on`) | ⇧⌘H | Mod+Shift+H | `view.toggle_task_counts` |
 | Toggle focus mode | ⌘Y | Mod+Y | `view.focus` |
 | Toggle collapsed columns | ⇧⌘Y | Mod+Shift+Y | `view.collapse_columns` |
 | Increase text size | ⌘+ or ⌘= | Mod++ or Mod+= | `font.increase` |
@@ -326,7 +327,8 @@ the keyboard back with its caret where it was.
 [summary view](../reference/tasks.md#the-summary-view) of where the keyboard
 is: the selected section or group in the Sections and Groups columns, the
 group listed in the Notes column, and the open note's group from the editor
-or a board. A count in a column header opens the view of its scope too. The
+or a board. A count in a column header opens the view of its scope too, and
+**Toggle task counts** (⇧⌘H / Mod+Shift+H) hides and shows the counts. The
 view takes the keyboard when it opens; Back returns to the previous view or
 note, or the empty pane.
 
@@ -355,12 +357,12 @@ shortcut that takes the keyboard (the palette, a dialog) or a refused write.
 Held keys do not repeat, except the arrows. While the description field
 is open, the view's toggle and undo keys do nothing.
 
-**Toggle task counts** (`view.toggle_task_counts`) has no default key. It
+**Toggle task counts** (⇧⌘H / Mod+Shift+H, `view.toggle_task_counts`)
 hides or shows the header counts, saves `task-counts` to `config.conf` (or,
 if that cannot be written, holds the change for this session and says so),
 and leaves a message whose Undo flips it back. **Hide tasks in this note**
 (`note.hide_tasks`) and **Hide tasks from this group** (`group.hide_tasks`)
-have no keys either; they are in the palette and on a row's actions.
+have no default keys; they are in the palette and on a row's actions.
 
 ### Task suggestions
 
@@ -643,7 +645,8 @@ task.priority.lower  task.set_due  task.clear_due  task.edit
 
 The app's own task commands, also only with `tasks = on`, are `tasks.show`
 (⇧⌘T / Mod+Shift+T), `note.hide_tasks`, `group.hide_tasks` and
-`view.toggle_task_counts`; only the first has a default key. See
+`view.toggle_task_counts` (⇧⌘H / Mod+Shift+H); the hides have no default
+key. See
 [The task summary view](#the-task-summary-view).
 
 `task.set_status` and `task.set_priority` open the status and priority
