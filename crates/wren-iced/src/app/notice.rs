@@ -246,6 +246,10 @@ impl App {
 /// that replaces it: the release that ends it there finds a button no
 /// press began, which does nothing. Every press and release over the
 /// message is its own, so none reaches what it covers.
+/// The widest a message grows; one with Undo is this wide, its words
+/// wrapping inside it, so the button keeps its room in a narrow pane.
+const NOTICE_WIDTH: f32 = 520.0;
+
 pub(super) fn frame<'a, R>(
     serial: u64,
     words: Element<'a, Message, iced::Theme, R>,
@@ -256,18 +260,24 @@ where
     R: iced::advanced::text::Renderer + 'a,
 {
     let colors = definition.colors;
-    let mut line = row![words].spacing(10).align_y(iced::Center);
+    let mut line = row![].spacing(10).align_y(iced::Center);
     if let Some(face) = undo {
+        // The words fill what the button leaves: laid out first, as a
+        // shrinking child, they would take the room the button needs.
+        line = line.push(container(words).width(Fill));
         line = line.push(
             button(face)
                 .padding([2, 8])
                 .on_press(Message::Notice(Event::Undo(serial)))
                 .style(move |_, status| undo_button(definition, status)),
         );
+    } else {
+        line = line.push(words);
     }
     let message = button(
         container(line)
             .id("task-notice")
+            .max_width(NOTICE_WIDTH)
             .padding(iced::Padding {
                 top: 7.0,
                 right: 8.0,
