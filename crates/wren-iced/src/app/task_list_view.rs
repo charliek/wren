@@ -597,8 +597,18 @@ impl App {
             &built.held,
         );
         let footer = self.task_list_counts(&built.scope);
+        let height = self.list_height();
         let list = &mut self.task_list;
-        list.listing = listing;
+        let before = std::mem::replace(&mut list.listing, listing);
+        // Whether the selected row was in sight: if so, it is kept in
+        // sight wherever the rebuild puts it, so a key acts on a row the
+        // user can see.
+        let in_sight = |tops: &[f32], entry: usize, scroll: f32| {
+            tops.get(entry)
+                .is_some_and(|&top| top >= scroll && top + ROW_HEIGHT <= scroll + height)
+        };
+        let seen = (list.selected.as_ref())
+            .is_some_and(|selected| in_sight(&before.tops, selected.entry, list.scroll));
         list.titles = titles;
         list.footer = footer;
         list.generation += 1;
@@ -611,7 +621,7 @@ impl App {
             list.describe = None;
         }
         // An edit follows its row, and ends when the list no longer shows it.
-        self.follow_describe();
+        self.follow_describe(&before.records);
         let list = &mut self.task_list;
         let previous = list.selected.take();
         let entry = previous
@@ -638,6 +648,12 @@ impl App {
         let scroll = list
             .scroll
             .min((list.listing.height() - list.height.unwrap_or(0.0)).max(0.0));
+        if let Some(entry) =
+            entry.filter(|&entry| seen && !in_sight(&list.listing.tops, entry, scroll))
+        {
+            list.scroll = scroll;
+            return self.select_entry(entry);
+        }
         if !new_scope && scroll == list.scroll {
             return Task::none();
         }
@@ -868,16 +884,19 @@ impl App {
     }
 
     /// Whether a repeat of `press`, whose copy for the app is `copy`, does
-    /// nothing: Space, Enter and the toggle chord, and every key that opens
-    /// something (S, P, D, E, F2, ↓ on a control with a menu), and on an
-    /// open menu all but its arrows.
+    /// nothing: Space, Enter, the toggle and undo chords, + and -, and
+    /// every key that opens something (S, P, D, E, F2, ↓ on a control with
+    /// a menu), and on an open menu all but its arrows.
     fn ignores_repeat(&self, press: &Press, copy: Option<&AppCopy>) -> bool {
         use super::task_rows::RowAct;
         match copy {
             Some(AppCopy::Escape) => false,
             Some(AppCopy::Shortcut(accel)) => {
                 super::task_describe::is_describe_key(accel)
-                    || self.preferences.keymap.action(accel) == Some("markdown.toggle_task")
+                    || matches!(
+                        self.preferences.keymap.action(accel),
+                        Some("markdown.toggle_task" | "edit.undo")
+                    )
             }
             None if self.task_list.menu.is_some() => !matches!(
                 press.key,
@@ -892,6 +911,8 @@ impl App {
                                 | RowAct::PriorityMenu
                                 | RowAct::Calendar
                                 | RowAct::Form
+                                | RowAct::Raise
+                                | RowAct::Lower
                         )
                     )
                     || (press.key == Key::Named(Named::ArrowDown)
@@ -1329,9 +1350,16 @@ impl App {
     /// Open the note of the entry `entry` at its task's line, and give the
     /// editor the keyboard with the caret there.
     pub(super) fn open_task_at(&mut self, entry: usize) -> Task<Message> {
-        let Some(record) = self.task_list.listing.record(entry).cloned() else {
+        let Some(record) = self.task_list.listing.record(entry) else {
             return Task::none();
         };
+        let task = super::task_target::RowTarget::of(record);
+        self.open_task(&task)
+    }
+
+    /// Open the note of `task` at the line a write would find it on, and
+    /// give the editor the keyboard with the caret there.
+    pub(super) fn open_task(&mut self, record: &super::task_target::RowTarget) -> Task<Message> {
         let target = SearchTarget {
             generation: self.workspace_generation(),
             index_revision: self
@@ -1369,7 +1397,7 @@ impl App {
         // same text (a twin in a fence is no task). With none, or two, the
         // note opens where it was, and says why.
         let text = self.editor.text();
-        let Some(line) = wren_core::task_write::locate(&text, record.line, &record.source) else {
+        let Some(line) = wren_core::task_write::locate(&text, record.line, &record.expect) else {
             self.notify(super::notice::Notice::new(vec![super::notice::Part::Text(
                 STALE_OPEN.into(),
             )]));

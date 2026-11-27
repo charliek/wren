@@ -977,6 +977,7 @@ impl Session {
             }
             Op::Flush => {
                 self.flush_active(now, true, events)?;
+                self.retry_tasks_file();
                 self.store
                     .retry_durability()
                     .map_err(|error| error.to_string())?;
@@ -1093,11 +1094,21 @@ impl Session {
                 self.reconcile_job = None;
                 self.reconcile_requested = true;
                 self.flush_active(now, true, events)?;
+                let tasks_saved = self.persist_tasks_file(&mut Vec::new());
                 self.store
                     .retry_durability()
                     .map_err(|error| error.to_string())?;
                 if std::fs::canonicalize(&path).ok().as_deref() == Some(self.store.root()) {
                     return Ok(());
+                }
+                let unsaved = self.tasks_file.as_ref().is_some_and(TasksFile::dirty);
+                if let (Err(error), true) = (tasks_saved, unsaved) {
+                    // The settings are read again from disk by the next
+                    // load, so what could not be saved is lost: said, not
+                    // blocking.
+                    events.push(Event::Warning(format!(
+                        "Task settings changed in the workspace left were not saved: {error}"
+                    )));
                 }
                 // Construct the replacement before releasing any old state or lock.
                 let mut replacement = Self::load(
@@ -2276,11 +2287,27 @@ impl Session {
             return Ok(());
         }
         file.save(&mut self.store).map_err(|error| {
-            events.push(Event::Warning(format!(
-                "The change remains applied; task settings were not saved: {error}"
-            )));
+            // Published, its durability unconfirmed: saved, and said so.
+            events.push(Event::Warning(if file.dirty() {
+                format!("The change remains applied; task settings were not saved: {error}")
+            } else {
+                error.clone()
+            }));
             error
         })
+    }
+
+    /// Save task settings an earlier op changed but could not save (a
+    /// rename that published while `.wren/tasks.toml` could not be
+    /// written), over the bytes last read or saved as every save is. That
+    /// failure was reported when it happened; one still failing here stays
+    /// pending for the next flush, rather than blocking the flush.
+    fn retry_tasks_file(&mut self) {
+        if let Some(file) = &mut self.tasks_file {
+            if file.dirty() {
+                let _ = file.save(&mut self.store);
+            }
+        }
     }
 
     fn record_history(&mut self, note: NoteId) {

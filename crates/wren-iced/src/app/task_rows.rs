@@ -25,7 +25,8 @@
 //!   refreshed", the list shows the note as it is now, and the rest of
 //!   the batch is dropped: it was typed for the row refused.
 //! - **A held key** repeats nothing that writes or opens: Space, the
-//!   toggle chord, Enter, S, P, D, E and F2 act once (`task_list_view.rs`).
+//!   toggle and undo chords, Enter, S, P, D, E, F2, + and - act once
+//!   (`task_list_view.rs`).
 //! - **Rows stay put until R.** A task written keeps each of its rows in
 //!   its group and at its place there, and stays shown whatever the filters
 //!   say of it now ([`super::task_list::Hold`]), so the next key acts on the
@@ -368,7 +369,12 @@ impl App {
                         hold.line = write.line;
                         hold.source.clone_from(&write.after);
                     }
-                    self.rekey_selection(write.note, write.line, write.line, &write.after);
+                    self.rekey_selection(
+                        write.note,
+                        (write.line, &write.before),
+                        write.line,
+                        &write.after,
+                    );
                 }
                 self.notify(Notice::new(vec![Part::Text(words)]));
             }
@@ -466,20 +472,28 @@ impl App {
             }),
             None => {}
         }
-        self.rekey_selection(target.note, line, write.line, &write.after);
+        self.rekey_selection(
+            target.note,
+            (line, &target.expect),
+            write.line,
+            &write.after,
+        );
     }
 
-    /// The selection on the task at `line` of `note` follows it to `moved`,
-    /// where it reads `source`, in the group it was selected in.
+    /// The selection on the task at `line` of `note`, which read `was`,
+    /// follows it to `moved`, where it reads `source`, in the group it was
+    /// selected in. A selection on another task, listed at that line before
+    /// the note's lines moved, stays where it is.
     fn rekey_selection(
         &mut self,
         note: wren_core::model::NoteId,
-        line: usize,
+        (line, was): (usize, &str),
         moved: usize,
         source: &str,
     ) {
         if let Some(selected) = &mut self.task_list.selected {
-            if selected.key.note == note && selected.key.line == line {
+            if selected.key.note == note && selected.key.line == line && selected.key.source == was
+            {
                 selected.key = RowKey {
                     note,
                     line: moved,
@@ -606,7 +620,9 @@ impl App {
             boxed,
         };
         match row {
-            OPEN_ROW => entry.map_or_else(Task::none, |entry| self.open_task_at(entry)),
+            // The menu's own task, found as a write finds it: never a twin
+            // the list followed the row to.
+            OPEN_ROW => self.open_task(target),
             HIDE_ROW => {
                 // Only while the row's task is in the note as the hide reads
                 // it: a row whose task has gone hides nothing.
@@ -1718,6 +1734,90 @@ mod tests {
         );
     }
 
+    /// CodeRabbit on PR #13: the menu's "Open the note at this line"
+    /// opens its own task as a write finds it, never a twin the list
+    /// followed its row to; with none to find, the note opens and says so.
+    #[test]
+    fn the_menus_open_goes_to_its_own_task_not_a_twin() {
+        let (directory, mut app) = fixture();
+        right_click(&mut app, "Order lunch");
+        assert!(app.task_list.menu.is_some());
+        write_b(
+            &directory,
+            "# B
+
+Lunch is sorted.
+
+- [ ] Order lunch
+- [ ] Order lunch
+",
+        );
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        choose(&mut app, "Open the note at this line");
+        assert_eq!(app.selected_note, Some(note(&app, "B")));
+        assert_eq!(
+            notice(&app).as_deref(),
+            Some(super::super::task_list_view::STALE_OPEN)
+        );
+        assert_ne!(app.editor.cursor().position.line, 4);
+        assert_ne!(app.editor.cursor().position.line, 5);
+    }
+
+    /// CodeRabbit on PR #13: an undo that finds its line moved by another
+    /// program leaves a selection on another task, listed at that line
+    /// before, where it is.
+    #[test]
+    fn an_undo_keeps_a_selection_on_another_task() {
+        let (directory, mut app) = fixture();
+        write_b(&directory, "# B\n\n- [ ] Order lunch\n- [ ] Call Kim\n");
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        select(&mut app, "Order lunch");
+        batch(&mut app, &[space()]);
+        let done = on_disk(&directory, "B");
+        assert!(done.contains("[x] Order lunch"), "{done}");
+        select(&mut app, "Call Kim");
+        write_b(&directory, &done.replace("# B\n\n", "# B\n\nIntro.\n"));
+        let undo = undo_key(&app);
+        batch(&mut app, &[undo]);
+        let _ = app.update(Message::Tick);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            "# B\n\nIntro.\n- [ ] Order lunch\n- [ ] Call Kim\n"
+        );
+        let selected = app.selected_row().expect("a row selected");
+        let record = app.task_list.listing.record(selected).unwrap();
+        assert_eq!(record.description, "Call Kim");
+    }
+
+    /// CodeRabbit on PR #13: a selected row in sight stays in sight when
+    /// a rebuild moves it, so the next key acts on a row the user sees.
+    #[test]
+    fn a_selected_row_in_sight_stays_in_sight_after_a_rebuild() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        assert_eq!(app.task_list.scroll, 0.0);
+        let mut text = String::from("# B\n\n");
+        for at in 0..300 {
+            text.push_str(&format!("- [ ] Early {at}\n"));
+        }
+        text.push_str(LUNCH);
+        text.push('\n');
+        write_b(&directory, &text);
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        let entry = app.selected_row().expect("a row selected");
+        assert_eq!(
+            app.task_list.listing.record(entry).unwrap().description,
+            "Order lunch"
+        );
+        let top = app.task_list.listing.tops[entry];
+        assert!(top > 0.0);
+        assert!(app.task_list.scroll > 0.0, "scrolled to it");
+        assert!(top >= app.task_list.scroll);
+    }
+
     /// Ring review, astra 2: an app shortcut runs at its place in the
     /// list's batch. The palette's chord then Space opens the palette and
     /// toggles nothing; its copy is spent, so it opens once.
@@ -1767,6 +1867,40 @@ mod tests {
         let before = app.selected_row();
         batch(&mut app, &[held(down)]);
         assert_ne!(app.selected_row(), before, "an arrow's repeat moves");
+    }
+
+    /// CodeRabbit on PR #13: a held undo chord undoes one write, and a
+    /// held + or - raises or lowers one level.
+    #[test]
+    fn a_held_undo_or_priority_key_acts_once() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        let held = |press: Press| Press {
+            repeat: true,
+            ..press
+        };
+        batch(&mut app, &[letter("=")]);
+        let raised = on_disk(&directory, "B");
+        assert_ne!(raised, B);
+        batch(&mut app, &[held(letter("="))]);
+        assert_eq!(on_disk(&directory, "B"), raised, "+ repeats nothing");
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("[x]"));
+        let undo = undo_key(&app);
+        batch(&mut app, &[undo.clone(), held(undo.clone())]);
+        assert_eq!(on_disk(&directory, "B"), raised, "one write undone");
+        batch(&mut app, &[held(undo)]);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            raised,
+            "a repeat alone undoes nothing"
+        );
+        assert!(app.task_list.copies.is_empty(), "the copies were spent");
+        batch(&mut app, &[letter("-")]);
+        let lowered = on_disk(&directory, "B");
+        assert_ne!(lowered, raised);
+        batch(&mut app, &[held(letter("-"))]);
+        assert_eq!(on_disk(&directory, "B"), lowered, "- repeats nothing");
     }
 
     /// Ring judge: a refused write stops the rest of its batch, which was

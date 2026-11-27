@@ -436,8 +436,9 @@ input of its batch, so keys typed in the same instant are dropped, not
 applied to the row. So is an app shortcut that takes the keyboard (the
 palette, a dialog); other app shortcuts run at their place in the batch. A
 refused write ("This task changed; the list was refreshed") drops the rest of
-its batch too. A held key does not repeat: Space, the toggle key, ↵, `s`,
-`p`, `d`, `e` and F2 act once, while the arrows repeat.
+its batch too. A held key does not repeat: Space, the toggle key, the undo
+key, ↵, `s`, `p`, `d`, `e`, F2, `+` and `-` act once, while the arrows
+repeat.
 
 With the mouse: a click on a box cycles the status (open, doing, done, open;
 a cancelled task reopens, and a box whose character has no status, such as
@@ -539,15 +540,17 @@ to edit the note.
 
 - **Hide** is refused when the block has a top-level line that is not a
   plain key (a quoted key, a flow mapping, a merge: any might be `tasks`),
-  when `tasks` is a list or another non-switch, and when the note begins with
-  `---` and closes it further down without being front matter as Wren reads
-  it.
+  when the block's keys are indented, when `tasks` is a list or another
+  non-switch, and when the note begins with `---` and closes it further down
+  without being front matter as Wren reads it.
 - **Show** removes every `tasks` line that hides, and the block if only blank
   lines remain. It is refused when `TP_ignore_this_file` is what hides the
   note ("`TP_ignore_this_file` hides this note's tasks; remove it in the
   note to show them"), when what is left would stop reading as front matter
   or make front matter of the note's own lines, or would join a byte-order
   mark to the text.
+- **Hide and Show** are refused when the `tasks` line they would change goes
+  on in indented lines under it, which YAML reads as more of its value.
 - **Hide, Show and Undo** are all refused when a line break on one side of
   the change would run into one on the other ("The note's line endings would
   run together there; edit the note").

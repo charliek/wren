@@ -1508,3 +1508,121 @@ fn an_exclusion_that_cannot_be_saved_changes_nothing() {
         .unwrap()
         .contains("Work/Plans"));
 }
+
+/// A rename publishes even when `.wren/tasks.toml` cannot then be written
+/// (CodeRabbit on PR #13): the remapped exclusion is saved by the next
+/// flush, over the bytes last read, so leaving the workspace and coming
+/// back does not bring the renamed group's tasks back.
+#[test]
+fn a_rename_whose_settings_failed_saves_them_at_the_next_flush() {
+    use wren_core::fs_store::Fault;
+    let root = fixture();
+    let mut session = session(root.path());
+    let plans = ItemRef::Group(group(&session, "Work/Plans"));
+    run(
+        &mut session,
+        Op::SetTasksExcluded {
+            target: plans,
+            excluded: true,
+        },
+    );
+    session.fail_next(Fault::Write);
+    let new_name = "Goals".into();
+    let renamed = session.apply_at(
+        Op::Rename {
+            target: plans,
+            new_name,
+        },
+        Duration::ZERO,
+    );
+    let events = match renamed {
+        Ok(events) => events,
+        Err(error) => error.events,
+    };
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::Warning(_))));
+    assert!(root.path().join("Work/Goals/Q1.md").exists());
+    assert!(fs::read_to_string(root.path().join(TASKS_FILE))
+        .unwrap()
+        .contains("Work/Plans"));
+    run(&mut session, Op::Flush);
+    let saved = fs::read_to_string(root.path().join(TASKS_FILE)).unwrap();
+    assert!(saved.contains("Work/Goals"), "{saved}");
+    assert!(!saved.contains("Work/Plans"), "{saved}");
+    // Read again from disk, the group stays out of task views.
+    let other = TempDir::new().unwrap();
+    let away = other.path().to_path_buf();
+    run(&mut session, Op::OpenWorkspace { path: away });
+    let home = root.path().to_path_buf();
+    run(&mut session, Op::OpenWorkspace { path: home });
+    assert_eq!(tasks(&session).excluded(), [rel("Work/Goals")]);
+}
+
+/// The same retry runs when the workspace is left without a flush first.
+#[test]
+fn leaving_a_workspace_retries_its_unsaved_task_settings() {
+    use wren_core::fs_store::Fault;
+    let root = fixture();
+    let mut session = session(root.path());
+    let plans = ItemRef::Group(group(&session, "Work/Plans"));
+    run(
+        &mut session,
+        Op::SetTasksExcluded {
+            target: plans,
+            excluded: true,
+        },
+    );
+    session.fail_next(Fault::Write);
+    let new_name = "Goals".into();
+    let _ = session.apply_at(
+        Op::Rename {
+            target: plans,
+            new_name,
+        },
+        Duration::ZERO,
+    );
+    let other = TempDir::new().unwrap();
+    let away = other.path().to_path_buf();
+    run(&mut session, Op::OpenWorkspace { path: away });
+    let saved = fs::read_to_string(root.path().join(TASKS_FILE)).unwrap();
+    assert!(saved.contains("Work/Goals"), "{saved}");
+}
+
+/// A filter change published whose durability is unconfirmed is said to
+/// be published, not "not saved" (CodeRabbit on PR #13).
+#[test]
+fn a_published_filter_change_is_not_said_to_be_unsaved() {
+    use wren_core::fs_store::Fault;
+    let root = fixture();
+    fs::create_dir_all(root.path().join(".wren")).unwrap();
+    let mut session = session(root.path());
+    session.fail_next(Fault::DirectorySync);
+    let filters = TaskFilters {
+        group_by: GroupBy::Owner,
+        ..TaskFilters::default()
+    };
+    let result = session.apply_at(
+        Op::SetTaskFilters {
+            scope: None,
+            filters,
+        },
+        Duration::ZERO,
+    );
+    let events = match result {
+        Ok(events) => events,
+        Err(error) => error.events,
+    };
+    let warnings: Vec<&String> = (events.iter())
+        .filter_map(|event| match event {
+            Event::Warning(warning) => Some(warning),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "{events:?}");
+    assert!(warnings[0].contains("was published"), "{}", warnings[0]);
+    assert!(!warnings[0].contains("not saved"), "{}", warnings[0]);
+    assert!(fs::read_to_string(root.path().join(TASKS_FILE))
+        .unwrap()
+        .contains("owner"));
+}

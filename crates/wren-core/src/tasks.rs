@@ -31,7 +31,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hasher;
 use std::ops::Range;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use wren_markdown::block::{self, Boxes, Kind};
@@ -79,8 +79,9 @@ pub struct TaskRecord {
     /// The description, as [`wren_markdown::task::TaskLine::description_text`].
     pub description: String,
     /// The plain text of the nearest heading above the line; `None` at the
-    /// top of the note.
-    pub heading: Option<String>,
+    /// top of the note. One allocation is shared by every task under the
+    /// heading, whose title has no length limit.
+    pub heading: Option<Arc<str>>,
 }
 
 impl TaskRecord {
@@ -170,9 +171,12 @@ pub fn hides_tasks(source: &str) -> bool {
     };
     let (mut own, mut obsidian) = (None, None);
     for line in &head[1..end] {
-        match key_value(line) {
-            Some(("tasks", value)) => own = switch(value),
-            Some(("TP_ignore_this_file", value)) => obsidian = switch(value),
+        // A value that is not read (a quote not closed as expected) still
+        // makes its key the last of that name: it hides nothing.
+        let value = key_value(line).map(|(_, value)| value);
+        match plain_key(line) {
+            Some("tasks") => own = value.and_then(switch),
+            Some("TP_ignore_this_file") => obsidian = value.and_then(switch),
             _ => {}
         }
     }
@@ -182,15 +186,8 @@ pub fn hides_tasks(source: &str) -> bool {
 /// A top-level `key: value` line of front matter: the key, and the value
 /// without its quotes or a comment after it.
 pub(crate) fn key_value(line: &str) -> Option<(&str, &str)> {
-    let key = line
-        .bytes()
-        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        .count();
-    let rest = line[key..].strip_prefix(':')?;
-    if key == 0 || !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
-        return None;
-    }
-    let value = rest.trim();
+    let key = plain_key(line)?.len();
+    let value = line[key + 1..].trim();
     for quote in ['"', '\''] {
         if let Some(inner) = value.strip_prefix(quote) {
             let close = inner.find(quote)?;
@@ -208,6 +205,17 @@ pub(crate) fn key_value(line: &str) -> Option<(&str, &str)> {
         None => value,
     };
     Some((&line[..key], value))
+}
+
+/// The key of a top-level `key: value` line of front matter, whatever
+/// its value.
+fn plain_key(line: &str) -> Option<&str> {
+    let key = line
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .count();
+    let rest = line[key..].strip_prefix(':')?;
+    (key > 0 && (rest.is_empty() || rest.starts_with([' ', '\t']))).then_some(&line[..key])
 }
 
 /// What a YAML 1.1 boolean says, `None` for any other value.
@@ -355,7 +363,7 @@ fn read_lines<L: Lines + ?Sized>(
     // The heading each task found lies under, and what each heading says,
     // where this read has found out.
     let mut under: Vec<Option<usize>> = Vec::new();
-    let mut texts: Vec<Option<String>> = vec![None; above];
+    let mut texts: Vec<Option<Arc<str>>> = vec![None; above];
     // The text of each paragraph line since the last line that was none:
     // a setext heading's, when the read saw them all.
     let mut paragraph: Vec<Part> = Vec::new();
@@ -402,7 +410,7 @@ fn read_lines<L: Lines + ?Sized>(
                             title: Title::Atx(title.clone()),
                             empty: false,
                         });
-                        texts.push(Some(text));
+                        texts.push(Some(text.into()));
                     }
                 }
                 Kind::SetextUnderline { start, .. } => {
@@ -431,13 +439,13 @@ fn read_lines<L: Lines + ?Sized>(
         let parts: Vec<&str> = (parts.into_iter())
             .map(|(line, range)| &lines.line(line)[range])
             .collect();
-        texts[at] = Some(outline::plain_text(&parts.join(" ")));
+        texts[at] = Some(outline::plain_text(&parts.join(" ")).into());
     }
     // A setext heading found by this read whose paragraph began above the
     // lines read: its lines are read again, from the nearest state kept.
     for at in above..headings.len() {
         if texts[at].is_none() {
-            texts[at] = Some(said(kept, lines, &headings[at]));
+            texts[at] = Some(said(kept, lines, &headings[at]).into());
         }
         headings[at].empty = texts[at].as_deref().is_some_and(str::is_empty);
     }
@@ -447,7 +455,7 @@ fn read_lines<L: Lines + ?Sized>(
             .rposition(|heading| !heading.empty);
         task.heading = nearest.map(|at| {
             texts[at]
-                .get_or_insert_with(|| said(kept, lines, &headings[at]))
+                .get_or_insert_with(|| said(kept, lines, &headings[at]).into())
                 .clone()
         });
     }
@@ -1490,6 +1498,23 @@ mod tests {
         );
     }
 
+    /// CodeRabbit on PR #13: a heading's title, of any length, is held
+    /// once for all the tasks under it, not once for each.
+    #[test]
+    fn the_tasks_under_a_heading_share_its_title() {
+        let long = "word ".repeat(2_000);
+        let tasks = read(&format!(
+            "# {long}\n- [ ] one\n- [ ] two\n\nSetext\n===\n- [ ] three\n- [ ] four\n"
+        ));
+        let titles: Vec<&Arc<str>> = (tasks.iter())
+            .map(|task| task.heading.as_ref().unwrap())
+            .collect();
+        assert_eq!(&**titles[0], long.trim_end());
+        assert!(Arc::ptr_eq(titles[0], titles[1]));
+        assert_eq!(&**titles[2], "Setext");
+        assert!(Arc::ptr_eq(titles[2], titles[3]));
+    }
+
     #[test]
     fn front_matter_turns_a_notes_tasks_off() {
         for hidden in [
@@ -1545,6 +1570,11 @@ mod tests {
             "---\ntasks: off\ntasks: maybe\n---\n",
             "---\ntasks: off\ntitle: x\ntasks:\n---\n",
             "---\nTP_ignore_this_file: true\nTP_ignore_this_file: perhaps\n---\n",
+            // So does one whose quotes Wren does not read (CodeRabbit on
+            // PR #13).
+            "---\ntasks: off\ntasks: 'team''s choice'\n---\n",
+            "---\ntasks: off\ntasks: \"off\n---\n",
+            "---\nTP_ignore_this_file: true\nTP_ignore_this_file: 'it''s'\n---\n",
             // Indented, it is another key's value.
             "---\nnote: |\n  tasks: off\n---\n",
             "---\nmeta:\n  tasks: off\n---\n",

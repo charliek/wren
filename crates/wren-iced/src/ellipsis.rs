@@ -196,7 +196,7 @@ pub fn truncate(content: &str, mut fits: impl FnMut(&str) -> bool) -> String {
     let (mut low, mut high) = (0, boundaries.len().saturating_sub(1));
     while low < high {
         let middle = (low + high).div_ceil(2);
-        let candidate = format!("{}…", content[..boundaries[middle]].trim_end());
+        let candidate = format!("{}…", trim_end(&content[..boundaries[middle]]));
         if fits(&candidate) {
             low = middle;
         } else {
@@ -205,8 +205,18 @@ pub fn truncate(content: &str, mut fits: impl FnMut(&str) -> bool) -> String {
     }
     format!(
         "{}…",
-        content[..boundaries.get(low).copied().unwrap_or(0)].trim_end()
+        trim_end(&content[..boundaries.get(low).copied().unwrap_or(0)])
     )
+}
+
+/// `text` without the clusters of white space it ends in, whole: a
+/// cluster that is not all white space (a prepended mark before a space)
+/// stays as it is.
+fn trim_end(text: &str) -> &str {
+    let end = (text.grapheme_indices(true).rev())
+        .find(|(_, cluster)| !cluster.chars().all(char::is_whitespace))
+        .map_or(0, |(index, cluster)| index + cluster.len());
+    &text[..end]
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for Ellipsis<'_>
@@ -365,6 +375,14 @@ mod tests {
             truncate("Hi 👩\u{200d}💻 there", fits_chars(7)),
             "Hi 👩\u{200d}💻…"
         );
+    }
+
+    /// CodeRabbit on PR #13: white space is trimmed by whole clusters,
+    /// never out of one (U+0600 prepends to the space after it).
+    #[test]
+    fn trailing_white_space_goes_by_whole_clusters() {
+        assert_eq!(truncate("A\u{600} BC", fits_chars(4)), "A\u{600} …");
+        assert_eq!(truncate("API  migration", fits_chars(6)), "API…");
     }
 
     #[test]

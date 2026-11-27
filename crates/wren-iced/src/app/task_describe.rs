@@ -38,8 +38,10 @@
 //! - **One field, on one row.** The field is drawn on the one row it was
 //!   opened on, under its group (a task under two owners shows twice), and
 //!   follows that task through each rebuild of the list by its note and
-//!   its line's text; when the list no longer shows it there, or the user
-//!   scrolls the list, the edit ends, writing nothing. The write itself
+//!   its line's text, never to a twin that was a task of its own before;
+//!   when the list no longer shows it there, a rebuild moves it out of the
+//!   rows built, or the user scrolls the list, the edit ends, writing
+//!   nothing. The write itself
 //!   expects the line the row listed, so a task changed since is refused.
 //! - **Letters are the field's**, R included: the list's keys wait until
 //!   the field closes.
@@ -51,6 +53,7 @@
 
 use iced::{Element, Fill, Task};
 use wren_core::keybind::{Accel, Mods};
+use wren_core::tasks::TaskRecord;
 use wren_markdown::task::Change;
 
 use super::commands::CommandId;
@@ -174,25 +177,31 @@ impl App {
         self.task_list.describe.take().is_some()
     }
 
-    /// Follow the occurrence being edited into the listing just built, or
-    /// close the field, writing nothing, once it is gone from it. A task
-    /// that left its line is followed only to the one line of its note
-    /// that reads as it did, and the write goes there too: the field never
-    /// shows on one line and writes another. Two such lines cannot be told
-    /// apart, and close the field.
-    pub(super) fn follow_describe(&mut self) {
+    /// Follow the occurrence being edited into the listing just built from
+    /// `previous` (the records it was built from before), or close the
+    /// field, writing nothing, once it is gone from it. A task that left
+    /// its line is followed only to the one line of its note that reads as
+    /// it did, when no other line read so before (that one is a twin, a
+    /// task of its own, as for a held row), and the write goes there too:
+    /// the field never shows on one line and writes another. Two such
+    /// lines cannot be told apart, and close the field.
+    pub(super) fn follow_describe(&mut self, previous: &[TaskRecord]) {
         let list = &mut self.task_list;
         let Some(describe) = &mut list.describe else {
             return;
         };
         let key = &describe.key;
+        let twin = |record: &TaskRecord| record.note == key.note && record.source == key.source;
         let same: Vec<usize> = (list.listing.records.iter())
-            .filter(|record| record.note == key.note && record.source == key.source)
+            .filter(|record| twin(record))
             .map(|record| record.line)
             .collect();
         if !same.contains(&key.line) {
+            let others = (previous.iter())
+                .filter(|record| twin(record) && record.line != key.line)
+                .count();
             match same.as_slice() {
-                &[line] => {
+                &[line] if others == 0 => {
                     describe.key.line = line;
                     describe.target.line = line;
                 }
@@ -205,6 +214,14 @@ impl App {
         match describe.find_in(&list.listing) {
             Some(entry) => describe.entry = entry,
             None => list.describe = None,
+        }
+        // Moved out of the rows built, it has no field to type in, and the
+        // list's keys wait while one is open: the edit ends.
+        let built = self.built_rows();
+        if (self.task_list.describe.as_ref())
+            .is_some_and(|describe| !built.contains(&describe.entry))
+        {
+            self.task_list.describe = None;
         }
     }
 
@@ -1170,6 +1187,57 @@ mod tests {
             on_disk(&directory, "B"),
             "# B\n\nIntro.\n- [ ] Order lunch\n- [ ] Order lunch\n"
         );
+    }
+
+    /// CodeRabbit on PR #13: a twin that was a task of its own before
+    /// the rebuild is not where the edited one went: the field closes
+    /// rather than rename it.
+    #[test]
+    fn an_edit_never_moves_to_a_twin_that_was_listed_before() {
+        let (directory, mut app) = fixture();
+        let b = directory.path().join("workspace/Work/Tasks/B.md");
+        let rescan = |app: &mut App, text: &str| {
+            std::fs::write(&b, text).unwrap();
+            let _ = app.process_core(wren_core::ops::Op::Reconcile);
+            let _ = app.update(Message::Tick);
+        };
+        rescan(
+            &mut app,
+            "# B\n\n## One\n- [ ] Call\n\n## Two\n- [ ] Call\n",
+        );
+        select(&mut app, "Call");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Call Kim")]);
+        assert_eq!(app.task_list.describe.as_ref().unwrap().key.line, 3);
+        // Another program turns the first into prose: the second is left.
+        rescan(&mut app, "# B\n\n## One\nCall\n\n## Two\n- [ ] Call\n");
+        assert_eq!(field_text(&app), None);
+        field_batch(&mut app, &[LineEvent::Enter]);
+        assert_eq!(
+            on_disk(&directory, "B"),
+            "# B\n\n## One\nCall\n\n## Two\n- [ ] Call\n"
+        );
+    }
+
+    /// CodeRabbit on PR #13: a rebuild that moves the edited row out of
+    /// the rows built ends the edit, so the list's keys work again.
+    #[test]
+    fn an_edit_ends_when_a_rebuild_moves_its_row_out_of_the_rows_built() {
+        let (directory, mut app) = fixture();
+        let b = directory.path().join("workspace/Work/Tasks/B.md");
+        select(&mut app, "Order lunch");
+        list_batch(&mut app, &[f2()]);
+        field_batch(&mut app, &[typed("Order tea")]);
+        let mut text = String::from("# B\n\n");
+        for at in 0..300 {
+            text.push_str(&format!("- [ ] Early {at} 📅 2026-11-20\n"));
+        }
+        text.push_str("- [ ] Order lunch @sam 📅 2026-12-02\n");
+        std::fs::write(&b, text).unwrap();
+        let _ = app.process_core(wren_core::ops::Op::Reconcile);
+        let _ = app.update(Message::Tick);
+        assert_eq!(field_text(&app), None);
+        assert!(app.task_list.describe.is_none());
     }
 
     #[test]

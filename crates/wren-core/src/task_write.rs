@@ -549,6 +549,19 @@ fn key_of(line: &str) -> Key {
     }
 }
 
+/// Whether the `tasks` line at `line` of front matter closed by `close`
+/// goes on under it: the next line that is not blank is indented, and
+/// YAML reads it as more of the value (`off` and `more` as one scalar),
+/// so the line is no switch to rewrite or take away.
+fn continued(document: &Document<'_>, line: usize, close: usize) -> bool {
+    (line + 1..close)
+        .map(|line| document.line(line))
+        .find(|text| !text.trim().is_empty())
+        .is_some_and(|text| text.starts_with([' ', '\t']))
+}
+
+const CONTINUED: &str = "This note's `tasks` line goes on under it; edit the note";
+
 /// Whether a line is one that closes front matter.
 fn closes(line: &str) -> bool {
     matches!(line.trim_end_matches([' ', '\t']), "---" | "...")
@@ -593,6 +606,8 @@ const NOT_READ: &str = "This note's front matter has a key Wren cannot tell from
 ///     plain `tasks` that is no switch Wren reads (a list of another
 ///     tool's): either may be a `tasks` key already, which is not Wren's
 ///     to rewrite and must not get a second beside it;
+///   - when the top level is indented (an indented line before any key):
+///     a key at the margin would not be one of it;
 ///   - when the note begins with `---` and has a closing line further
 ///     down, but is not front matter as Wren reads it: it may be front
 ///     matter all the same (its first key quoted), and a new block above
@@ -602,6 +617,8 @@ const NOT_READ: &str = "This note's front matter has a key Wren cannot tell from
 ///   them, whoever wrote it; one that holds anything else stays. Refused
 ///   when the note would still be hidden, by Obsidian's
 ///   `TP_ignore_this_file`, which is not Wren's to remove.
+/// - **Either.** Refused when the `tasks` line to rewrite or take away
+///   goes on in indented lines under it ([`continued`]).
 ///
 /// Either way the front matter must end where the change leaves it, and
 /// the text around the change must read as it did. Refused when what is
@@ -644,12 +661,23 @@ pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Ref
         }
         (true, Some(close)) => {
             let mut own = None;
+            // An indented line before any key of the top level is no
+            // child of one: the top level is indented, and a key added
+            // at the margin would not be one of it.
+            let mut top = false;
             for line in 1..close {
                 let text = document.line(line);
                 match key_of(text) {
-                    Key::Under | Key::Other => {}
+                    Key::Under => {
+                        let content = text.trim_start_matches([' ', '\t']);
+                        if !top && !content.trim().is_empty() && !content.starts_with('#') {
+                            return Err(Refused::Invalid(NOT_READ.into()));
+                        }
+                    }
+                    Key::Other => top = true,
                     Key::Unsure => return Err(Refused::Invalid(NOT_READ.into())),
                     Key::Tasks => {
+                        top = true;
                         let reads = matches!(
                             tasks::key_value(text),
                             Some(("tasks", value)) if tasks::switch(value).is_some()
@@ -660,6 +688,9 @@ pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Ref
                                  add `tasks: off` in the note"
                                     .into(),
                             ));
+                        }
+                        if continued(&document, line, close) {
+                            return Err(Refused::Invalid(CONTINUED.into()));
                         }
                         own = Some(line);
                     }
@@ -686,6 +717,9 @@ pub fn set_hidden(source: &str, hidden: bool) -> Result<Option<SwitchWrite>, Ref
             };
             let blank = |line: &usize| document.line(*line).trim().is_empty();
             let gone: Vec<usize> = (1..close).filter(hides).collect();
+            if gone.iter().any(|&line| continued(&document, line, close)) {
+                return Err(Refused::Invalid(CONTINUED.into()));
+            }
             if (1..close)
                 .filter(|line| !hides(line))
                 .all(|line| blank(&line))
@@ -1234,6 +1268,45 @@ mod tests {
         assert_eq!(
             switched("\u{feff}---\ntasks: off\ntitle: A\n---\n", false).0,
             "\u{feff}---\ntitle: A\n---\n"
+        );
+    }
+
+    /// CodeRabbit on PR #13: a top level that is indented (a comment
+    /// first, so Wren reads the block) gets no key at the margin, and a
+    /// `tasks` line that goes on under it is neither rewritten nor taken.
+    #[test]
+    fn an_indented_top_level_or_a_continued_switch_is_refused() {
+        for source in [
+            "---\n# metadata\n  tasks: [a, b]\n---\n",
+            "---\n# metadata\n  title: A\n---\n",
+        ] {
+            let refused = set_hidden(source, true).unwrap_err();
+            assert!(
+                matches!(&refused, Refused::Invalid(why) if why.contains("cannot tell")),
+                "{source:?}: {refused:?}"
+            );
+        }
+        // Children indented under a key at the margin are still fine,
+        // and so is an indented comment.
+        assert_eq!(
+            switched("---\n# m\n  # n\nlist:\n  - a\n---\n", true).0,
+            "---\n# m\n  # n\nlist:\n  - a\ntasks: off\n---\n"
+        );
+        for (source, hidden) in [
+            ("---\ntitle: |\n  Keep\ntasks: off\n  more\n---\n", false),
+            ("---\ntasks: off\n\n  more\ntitle: A\n---\n", false),
+            ("---\ntasks: on\n  more\n---\n", true),
+        ] {
+            let refused = set_hidden(source, hidden).unwrap_err();
+            assert!(
+                matches!(&refused, Refused::Invalid(why) if why.contains("goes on")),
+                "{source:?}: {refused:?}"
+            );
+        }
+        // A switch line alone still goes.
+        assert_eq!(
+            switched("---\ntitle: |\n  Keep\ntasks: off\n---\n", false).0,
+            "---\ntitle: |\n  Keep\n---\n"
         );
     }
 

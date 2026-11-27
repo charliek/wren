@@ -782,7 +782,9 @@ impl App {
     /// for `None`, and save it. At either limit this is a no-op.
     ///
     /// On a board the same commands zoom it instead, one stop up or down or
-    /// back to 100 %: a look at the board, which changes no setting.
+    /// back to 100 %: a look at the board, which changes no setting. Only
+    /// a board on show: one under a task view is left as it is, and the
+    /// text size changes as over a note.
     pub(super) fn step_text_size(&mut self, delta: Option<f32>) -> Gateway {
         let current = self.preferences.settings.editor_font_size;
         let size = delta.map_or(settings::DEFAULT_FONT_SIZE, |delta| {
@@ -795,7 +797,8 @@ impl App {
         } else {
             Task::none()
         };
-        if let Some(board) = &mut self.board {
+        let shown = self.surface() == Surface::Board;
+        if let Some(board) = self.board.as_mut().filter(|_| shown) {
             match delta {
                 Some(delta) if delta > 0.0 => board.zoom_step(1),
                 Some(delta) if delta < 0.0 => board.zoom_step(-1),

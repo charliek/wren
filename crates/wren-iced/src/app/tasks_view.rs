@@ -1322,6 +1322,32 @@ mod tests {
         assert!(!app.find_open);
     }
 
+    /// CodeRabbit on PR #13: the text size commands zoom a board only
+    /// while it shows; under a view they change the text size, as they
+    /// do over a note.
+    #[test]
+    fn text_size_over_a_view_on_a_board_changes_the_text_not_the_board() {
+        let (_directory, mut app) = fixture();
+        assert_eq!(open(&mut app, "Flow"), Disposition::Completed);
+        assert_eq!(app.surface(), Surface::Board);
+        let zoom = app.board.as_ref().unwrap().viewport().zoom;
+        let size = app.preferences.settings.editor_font_size;
+        assert_eq!(show(&mut app, tasks_group()), Disposition::Completed);
+        assert_eq!(app.surface(), Surface::Tasks);
+        let _ = run(&mut app, CommandId::TextBigger);
+        assert_eq!(app.board.as_ref().unwrap().viewport().zoom, zoom);
+        assert_eq!(app.preferences.settings.editor_font_size, size + 1.0);
+        let _ = run(&mut app, CommandId::TextReset);
+        assert_eq!(app.board.as_ref().unwrap().viewport().zoom, zoom);
+        // On show again, the board zooms and the size stays.
+        assert_eq!(run(&mut app, CommandId::Back), Disposition::Completed);
+        assert_eq!(app.surface(), Surface::Board);
+        let size = app.preferences.settings.editor_font_size;
+        let _ = run(&mut app, CommandId::TextBigger);
+        assert_ne!(app.board.as_ref().unwrap().viewport().zoom, zoom);
+        assert_eq!(app.preferences.settings.editor_font_size, size);
+    }
+
     #[test]
     fn back_and_forward_pass_through_notes_views_and_boards() {
         let (_directory, mut app) = fixture();

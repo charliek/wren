@@ -394,10 +394,14 @@ impl App {
         if let Some(stop) = then.filter(|_| committed) {
             self.task_views.show(stop);
         }
-        // CreateNote persists selection only in its follow-up OpenNote operation.
+        // CreateNote persists selection only in its follow-up OpenNote
+        // operation; a task write changes a note, not workspace metadata.
         let read_only_metadata = error.is_none()
             && effect_committed
-            && !matches!(op, Op::CreateNote { .. })
+            && !matches!(
+                op,
+                Op::CreateNote { .. } | Op::EditTaskLine { .. } | Op::EditTaskSwitch { .. }
+            )
             && !session.state().writable();
         if read_only_metadata {
             error = Some(
@@ -1467,6 +1471,44 @@ mod tests {
             "first\nsecond retained draft"
         );
         assert!(app.metadata_warning.is_some());
+    }
+
+    /// CodeRabbit on PR #13: a task write saved in a workspace whose
+    /// metadata is read-only is a write saved, with no warning that
+    /// changes will not be remembered.
+    #[test]
+    fn a_task_write_is_no_metadata_change() {
+        let (directory, mut app) = fixture();
+        drop(app.session.take());
+        std::fs::write(directory.path().join("Inbox/General/Tasks.md"), "- [ ] a\n").unwrap();
+        let metadata = directory.path().join(".wren/workspace.toml");
+        std::fs::write(&metadata, b"layout = [malformed optional metadata\n").unwrap();
+        let options = SessionOptions {
+            boards: false,
+            tasks: true,
+        };
+        app.session = Some(Session::open_with(directory.path(), options).unwrap());
+        app.sync_editor(true);
+        assert!(!app.session.as_ref().unwrap().state().writable());
+        let note = (app.model().unwrap().notes.iter())
+            .find(|note| note.title == "Tasks")
+            .unwrap()
+            .id;
+        let _ = app
+            .apply_core(Op::EditTaskLine {
+                note,
+                line: 0,
+                expect: "- [ ] a".into(),
+                change: wren_core::task_write::LineChange::Line("- [x] a".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("Inbox/General/Tasks.md")).unwrap(),
+            "- [x] a\n"
+        );
+        let processed = app.last_processed.as_ref().unwrap();
+        assert_eq!(processed.disposition, Disposition::Completed);
+        assert_eq!(processed.warning, None);
     }
 
     #[test]
