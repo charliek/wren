@@ -32,6 +32,8 @@ swash.workspace = true
 # Renders a board's SVG export as PNG. Already in the tree through iced's svg
 # feature, so it adds no package.
 resvg = { version = "=0.45.1", default-features = false, features = ["text"] }
+# Where a cut label may end (`ellipsis.rs`); already in the tree.
+unicode-segmentation.workspace = true
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true }

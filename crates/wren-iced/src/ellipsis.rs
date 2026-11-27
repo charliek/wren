@@ -8,6 +8,8 @@
 
 use std::borrow::Cow;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::text::{self, Paragraph as _, Text};
 use iced::advanced::widget::{tree, Tree};
@@ -179,15 +181,18 @@ fn shaped<P: text::Paragraph<Font = Font>>(content: &str, size: f32, font: Font)
     })
 }
 
-/// The longest prefix of `content` (on a char boundary) for which `fits`
-/// holds with an ellipsis appended, or just "…" when nothing fits.
+/// The longest prefix of `content` (whole grapheme clusters, so never half
+/// a decomposed letter or a joined emoji) for which `fits` holds with an
+/// ellipsis appended, or just "…" when nothing fits.
 pub fn truncate(content: &str, mut fits: impl FnMut(&str) -> bool) -> String {
     if fits(content) {
         return content.to_string();
     }
-    // Candidate prefixes end before each char start; the full text (which
-    // did not fit) is never a candidate.
-    let boundaries: Vec<usize> = content.char_indices().map(|(index, _)| index).collect();
+    // Candidate prefixes end before each cluster's start; the full text
+    // (which did not fit) is never a candidate.
+    let boundaries: Vec<usize> = (content.grapheme_indices(true))
+        .map(|(index, _)| index)
+        .collect();
     let (mut low, mut high) = (0, boundaries.len().saturating_sub(1));
     while low < high {
         let middle = (low + high).div_ceil(2);
@@ -343,6 +348,23 @@ mod tests {
         assert_eq!(truncate("ab", |candidate| candidate != "ab"), "a…");
         assert_eq!(truncate("W", |candidate| candidate != "W"), "…");
         assert_eq!(truncate("", |_| false), "…");
+    }
+
+    /// Ring fix review, sol 8: a cut never splits a grapheme cluster.
+    #[test]
+    fn truncation_keeps_grapheme_clusters_whole() {
+        // A decomposed é: "e" and a combining acute, one cluster.
+        assert_eq!(truncate("Cafe\u{301} au lait", fits_chars(5)), "Caf…");
+        assert_eq!(
+            truncate("Cafe\u{301} au lait", fits_chars(6)),
+            "Cafe\u{301}…"
+        );
+        // A ZWJ emoji: three chars, one cluster.
+        assert_eq!(truncate("Hi 👩\u{200d}💻 there", fits_chars(5)), "Hi…");
+        assert_eq!(
+            truncate("Hi 👩\u{200d}💻 there", fits_chars(7)),
+            "Hi 👩\u{200d}💻…"
+        );
     }
 
     #[test]

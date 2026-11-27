@@ -188,8 +188,10 @@ pub(super) struct Trail {
     /// from, with no visit of its own (the Session records none for the
     /// note already open): that note is in history after the stop as well
     /// as before it, so Back from it is the view and Forward from the view
-    /// is the note. Kept only while the Session stays on that visit.
-    past: Option<StopId>,
+    /// is the note. Kept with the serial of the visit it was opened on,
+    /// while that stop still comes after that visit, so the Session
+    /// leaving the visit and coming back finds it again.
+    past: Option<(StopId, Option<u64>)>,
     /// With no view shown, the note shows as it was opened again after
     /// [`Trail::past`], not as it was before the views of its gap.
     on_past: bool,
@@ -216,18 +218,21 @@ impl Trail {
     /// The note under the stop `id` was opened again from it, recording
     /// no visit: it shows after the stop too (see [`Trail::past`]).
     pub(super) fn pass(&mut self, id: StopId) {
+        let Some(stop) = self.stops.iter().find(|stop| stop.id == id) else {
+            return;
+        };
         if self.shown.is_none() {
-            self.past = Some(id);
+            self.past = Some((id, stop.after));
             self.on_past = true;
         }
     }
 
     /// Where the stop the note was opened again from is, while it is in
-    /// the gap after the visit `here`, which the Session is on.
+    /// the gap after the visit `here`, the visit it was opened on.
     fn past_index(&self, here: Option<u64>) -> Option<usize> {
-        let id = self.past?;
+        let (id, visit) = self.past?;
         let index = self.stops.iter().position(|stop| stop.id == id)?;
-        (self.stops[index].after == here).then_some(index)
+        (self.stops[index].after == here && visit == here).then_some(index)
     }
 
     /// Leave the view for the note opened again after it.
@@ -360,7 +365,14 @@ impl Trail {
                 let gap = position
                     .checked_sub(1)
                     .and_then(|previous| serial_at(visits, Some(previous)));
-                let last = self.stops.iter().rev().find(|stop| stop.after == gap);
+                let last = self.stops.iter().rev().position(|stop| stop.after == gap);
+                let last = last.map(|from_end| self.stops.len() - 1 - from_end);
+                // The note opened again after the gap's last view is the
+                // gap's last place: the Session steps back onto it.
+                if last.is_some() && last == self.past_index(gap) && position > 0 {
+                    return Step::Session(None);
+                }
+                let last = last.map(|index| &self.stops[index]);
                 match (last, position) {
                     (Some(stop), 0) => Step::Show(stop.id),
                     (Some(stop), _) => Step::Session(Some(stop.id)),
@@ -452,11 +464,14 @@ impl Trail {
         } else if was_shown && mark.open && session.document().is_none() {
             self.lost = true;
         }
+        // Stepping back onto the visit the note was opened again on comes
+        // to the end of its gap, which is that note when no view follows
+        // it there; any other move comes to the visit's own place.
         let here = serial_at(session.visits(), session.visit_position());
         let newest = session.visits().last().map(|visit| visit.serial);
         if here != mark.here || newest != mark.newest {
-            self.past = None;
-            self.on_past = false;
+            self.on_past =
+                matches!(op, Op::Back) && self.shown.is_none() && self.past_index(here).is_some();
         }
         was_shown && self.shown.is_none()
     }

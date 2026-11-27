@@ -4957,6 +4957,7 @@ dependencies = [
  "swash",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
  "wren-board",
  "wren-canvas",
  "wren-core",

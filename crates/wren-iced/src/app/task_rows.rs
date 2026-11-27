@@ -373,6 +373,9 @@ impl App {
                 self.notify(Notice::new(vec![Part::Text(words)]));
             }
             Err(refusal) => {
+                // As a refused write does: what else its batch holds was
+                // typed for the list before the refresh.
+                self.task_list.stopped = true;
                 if self.banner.as_deref() == Some(refusal.message.as_str()) {
                     self.banner = None;
                 }
@@ -1627,16 +1630,42 @@ mod tests {
         assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
         let group = Scope::Group(RelPath::new("Work/Tasks").unwrap());
         assert_eq!(app.task_view(), Some(&group));
-        // From the note opened again, another note: the view behind stays,
-        // and Back from that note is the view.
+        // From the note opened again, another note: Back from it is the
+        // note opened again, then the view, then the note it was over;
+        // Forward walks the same way back to B.
         assert_eq!(step(&mut app, CommandId::Forward), Surface::Text);
+        let a = note(&app, "A");
         let b = note(&app, "B");
-        let target = app.note_target(b);
-        let _ = app.dispatch(Command::OpenNote(target));
-        let _ = app.update(Message::Tick);
-        assert_eq!(app.selected_note, Some(b));
+        let open_b = |app: &mut App| {
+            let target = app.note_target(b);
+            let _ = app.dispatch(Command::OpenNote(target));
+            let _ = app.update(Message::Tick);
+            assert_eq!(app.selected_note, Some(b));
+        };
+        open_b(&mut app);
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Text);
+        assert_eq!(app.selected_note, Some(a));
         assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
         assert_eq!(app.task_view(), Some(&group));
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Text);
+        assert!(!app.can_step(true));
+        for surface in [Surface::Tasks, Surface::Text, Surface::Text] {
+            assert_eq!(step(&mut app, CommandId::Forward), surface);
+        }
+        assert_eq!(app.selected_note, Some(b));
+
+        // Ring fix review, sol 3, as it was found: A, the view, ↵ on A's
+        // task, B; Back is A, then the view.
+        let (_directory, mut app) = fixture();
+        select(&mut app, "Book the room");
+        batch(
+            &mut app,
+            &[press(Key::Named(Named::Enter), Modifiers::empty(), None)],
+        );
+        open_b(&mut app);
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Text);
+        assert_eq!(app.selected_note, Some(a));
+        assert_eq!(step(&mut app, CommandId::Back), Surface::Tasks);
     }
 
     /// Ring review, astra 7: a note's group a held row keeps names the
@@ -1755,6 +1784,23 @@ mod tests {
         select(&mut app, "Order dinner");
         batch(&mut app, &[space()]);
         assert!(on_disk(&directory, "B").contains("- [x] Order dinner"));
+    }
+
+    /// Ring fix review, sol 6: a refused undo stops the rest of its batch,
+    /// as a refused write does.
+    #[test]
+    fn a_refused_undo_stops_the_rest_of_its_batch() {
+        let (directory, mut app) = fixture();
+        select(&mut app, "Order lunch");
+        batch(&mut app, &[space()]);
+        assert!(on_disk(&directory, "B").contains("[x]"));
+        let theirs = "# B\n\n- [ ] Order dinner\n";
+        write_b(&directory, theirs);
+        let undo = undo_key(&app);
+        batch(&mut app, &[undo, space()]);
+        assert_eq!(on_disk(&directory, "B"), theirs);
+        let refused = format!("Nothing undone: {CHANGED}");
+        assert_eq!(notice(&app).as_deref(), Some(refused.as_str()));
     }
 
     /// Ring judge, sev 4: an undo from the view says what it undid and
