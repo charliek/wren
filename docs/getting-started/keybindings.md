@@ -327,7 +327,8 @@ the keyboard back with its caret where it was.
 is: the selected section or group in the Sections and Groups columns, the
 group listed in the Notes column, and the open note's group from the editor
 or a board. A count in a column header opens the view of its scope too. The
-view takes the keyboard when it opens; Back returns to the note.
+view takes the keyboard when it opens; Back returns to the previous view or
+note, or the empty pane.
 
 | Key | Does |
 |---|---|
@@ -342,18 +343,20 @@ view takes the keyboard when it opens; Back returns to the note.
 | ⌘Z / Mod+Z | undoes the last task write; this is `edit.undo`'s key, so it follows a rebinding |
 | Tab, ⇧Tab | the next or previous control (the scope chip, the status chips, the pickers and Hide done), and the list between them |
 | ← → | between the controls, while one has the keyboard |
-| ↵, Space, ↓ | on a control, presses it or opens its menu |
+| ↵, Space | on a control, presses a chip or Hide done, or opens a picker's menu; ↓ opens a picker's menu |
 | Esc | closes the menu, calendar or form over the list; on a control, gives the keyboard back to the list. It does not leave the view |
 
-The menus over the view take the keys of [Task menus](#task-menus); the
-scope menu takes `w` Workspace, `s` Section, `g` Group and `n` Note. A key
+The row menus take the keys of [Task menus](#task-menus), and the row's task
+menu adds `o` Open the note and `h` Hide tasks in the note. The filter menus
+have their own keys, shown beside their rows; the scope menu takes `w` Workspace, `s` Section, `g` Group and `n` Note. A key
 that opens a menu, the calendar or the form is the last input of its batch,
 so keys typed in the same instant are dropped. While the description field
 is open, the view's toggle and undo keys do nothing.
 
 **Toggle task counts** (`view.toggle_task_counts`) has no default key. It
-hides or shows the header counts, saves `task-counts` to `config.conf`, and
-leaves a message whose Undo flips it back. **Hide tasks in this note**
+hides or shows the header counts, saves `task-counts` to `config.conf` (or,
+if that cannot be written, holds the change for this session and says so),
+and leaves a message whose Undo flips it back. **Hide tasks in this note**
 (`note.hide_tasks`) and **Hide tasks from this group** (`group.hide_tasks`)
 have no keys either; they are in the palette and on a row's actions.
 

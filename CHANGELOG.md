@@ -21,10 +21,10 @@ version's section as its notes, and publishes to the apt repo. See
   or note in the editor pane. Filter by status, owner (Me, or a name),
   due date and priority, group by note, due date, priority or owner, and
   hide done work older than 14 days; the filters are remembered for each
-  scope. Space, ⌘↵, a click on the box, menus, the calendar, the task form
+  scope. Space, ⌘↵ (Mod+Enter), a click on the box, menus, the calendar, the task form
   and a rename of the description (F2) change the task in its note, open or
   closed, with a message and Undo (⌘Z / Mod+Z); rows stay where they are
-  until you refresh. See
+  until you refresh, change a filter or scope, or leave the view. See
   [Tasks](https://charliek.github.io/wren/reference/tasks/#the-summary-view).
 - **Hide tasks** from the summaries: **Hide tasks in this note** writes
   `tasks: off` into its front matter (Obsidian's `TP_ignore_this_file: true`
@@ -39,11 +39,12 @@ version's section as its notes, and publishes to the apt repo. See
 
 ### Fixed
 
-- A workspace scan that finishes late can no longer undo what you did while
-  it ran: a failed scan keeps the open and just-changed notes, a result that
-  leaves out a note you touched is dropped and rescanned, a note found
-  deleted while a scan finished is removed, and a failed open reads the
-  note again. This fixes races in search as well as tasks.
+- Fixed some races where a workspace scan that finishes late undid recent
+  changes, in search as well as tasks: a failed scan keeps the open and
+  just-changed notes, a result that omits a changed note that still exists is
+  dropped and rescanned, the open note found deleted is removed, and a failed
+  open reads the note again. A note recreated just after a failed open can
+  show no content in search until the next poll, about a second.
 
 ## v0.2.2 — 2026-11-26
 

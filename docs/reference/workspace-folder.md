@@ -86,8 +86,8 @@ on a board reopens on it through `selection` or `last_open`; with
 
 Wren's own file for [tasks](tasks.md), beside `workspace.toml` and kept
 inside the workspace so it travels with it. It is created only once
-something is set, and never exists with `tasks = off`: with tasks off Wren
-neither reads nor writes it.
+something is set. With `tasks = off` Wren neither reads nor writes it, even
+if the file exists.
 
 | Key | Meaning |
 |---|---|

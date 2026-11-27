@@ -303,7 +303,7 @@ checked absent on classic, and with tasks off.
 
 | File | What it covers |
 |---|---|
-| `test_tasks_gate.py` | Tasks off: no task command or key, every `tasks.*` request but `tasks.get` refused (it answers `{"tasks": false}`), and the pinned date reaching the app with tasks on. |
+| `test_tasks_gate.py` | Tasks off: no task command or key, every `tasks.*` request refused, or answering `{"tasks": false}` for the plain `tasks.get`, `tasks.view`, `tasks.entry` and the view's `write`, `hide` and `undo`, and the pinned date reaching the app with tasks on. |
 | `test_tasks_baseline.py` | The baseline note with tasks off: Enter, Backspace, toggle, highlighting, previews and spelling as before the feature. `make check` pins the same note in `crates/wren-iced/golden/tasks-baseline.txt`. |
 | `test_tasks_emoji.py` | The task glyphs: caret steps, one-press Backspace, selection and hit-testing. |
 | `test_tasks_status.py` | The statuses of the box, and the toggle's stamps. |
@@ -320,8 +320,9 @@ checked absent on classic, and with tasks off.
 | `test_tasks_view_list.py` | The list: filters, grouping, order, the footer, the keys, the menus, and the filters remembered in `.wren/tasks.toml` across a restart. Its workspace is `fixtures/tasks/list/`. |
 | `test_tasks_view_write.py` | Writes from a row: keys, clicks and menus, the message and its Undo, and rows held until `r`. |
 
-`tasks.get` reports the task state and is the one request that answers with
-tasks off (`{"tasks": false}`). With them on it gives `today`, the date the
+`tasks.get` reports the task state, and with tasks off it, like plain
+`tasks.view`, plain `tasks.entry` and the view's `write`, `hide` and `undo`,
+answers `{"tasks": false}`. With them on it gives `today`, the date the
 app last `seen` and how many times the day has changed (`day_changes`), the
 `engine`, the caret's `line` (its number, its text and its task: the box's
 byte range, symbol, status name and type, or `null`), its `tokens` (each
@@ -331,7 +332,7 @@ overdue and its pieces). `tasks.set_today` `{"date": "YYYY-MM-DD"}` moves
 the clock as midnight would, so the colours, the footer and the calendar
 refresh. `tasks.owners` returns the owners suggestions would offer, each
 with its note count, and whether the list is current for the workspace.
-Every `tasks.*` request but `tasks.get` is refused with tasks off.
+Any other `tasks.*` request is refused with tasks off.
 
 `editor.open_menu`, `editor.click`, `editor.bounds` and `editor.right_click`
 drive the popovers and clicks; `editor.cursor` places the caret.
@@ -418,15 +419,18 @@ it has the keyboard (`{"tasks": false}` with tasks off). `{"open": {"scope":
 any entry point does, and answers with the action's `disposition` and
 `warning`. `{"key": {"key": …, "mods": […]}}` presses a key while the view
 has the keyboard, as its key wrapper and then the app hear it, and
-`{"click": …}` clicks a control, `{"cell": {"row": n, "cell": "box" |
-"priority" | "due"}}` a cell of the nth row, `{"right": n}` right-clicks a
-row, `{"menu": label}` presses a row of the menu over the view, and with
+`{"click": …}` clicks a control, or with `{"click": {"cell": {"row": 0,
+"cell": "box" | "priority" | "due"}}}` a cell of a row, `{"click": {"right":
+0}}` right-clicks a row, `{"click": {"menu": "Done"}}` presses a row of the
+menu over the view (rows count from zero), and with
 `{"list": true}` the answer adds the list's state: its filters, chips,
 groups, rows (with whether each is held in place), counts, focus, open menu,
-and where the controls were drawn. `{"write": {"path", "line", "expect"?,
-"change"}}`, `{"hide": {"path", "hidden"}}` and `{"undo": true}` call the
-functions the keys and menus call, and answer with the `write` or `switch`
-made, a `refused` message when nothing was written, the index's `note`,
+and where the controls were drawn. `{"write": {"path": "Work/A.md", "line":
+0, "change": "toggle"}}` (`line` counts from zero; `expect` optionally names
+the line a stale row holds), `{"hide": {"path", "hidden"}}` and `{"undo":
+true}` call the functions the keys and menus call, and answer with the
+`write` or `switch` made, `refused` (`{"message", "refresh"}` when nothing
+was written, `null` for a write that changed nothing), the index's `note`,
 `can_undo`, and the action's `disposition` and `warning`. Under a view every
 `board.*` request but `board.get` is refused, and so is `editor.focus`, and
 a key is refused while the view has no keyboard. `navigation.get` reports
@@ -436,7 +440,7 @@ the pane as `surface` (`text`, `board`, `raw` or `tasks`), and its
 `tasks.entry` reports the ways in: with no parameters `{"tasks", "counts",
 "headers", "marks", "scope", "notice"}`, whether the headers count, each
 column's count (its `scope`, `path`, `open_and_doing`, `overdue`, `pressed`
-and `tip`), the paths of the notes and groups that carry a mark, the scope
+and `label`), the paths of the notes and groups that carry a mark, the scope
 `tasks.show` would open now, and the message showing with its `text`,
 `code` and whether it has `undo`. `{"click": column}` clicks a column's
 count, `{"undo": true}` presses the message's Undo and `{"dismiss": true}`

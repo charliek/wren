@@ -31,8 +31,8 @@ With `tasks = off`, task lines are plain Markdown checkboxes again:
   as plain Markdown.
 - No task command is listed, its keys do nothing, and a `keybind` line
   that names one is skipped with a warning.
-- There is no [summary view](#the-summary-view), no count in a column
-  header, and no `.wren/tasks.toml`.
+- There is no [summary view](#the-summary-view) and no count in a column
+  header, and Wren does not read or write `.wren/tasks.toml`.
 
 `tasks-suggest = off` turns off only the [suggestions](#suggestions) while
 typing. It applies when the settings reload.
@@ -327,17 +327,22 @@ does is written into the notes as plain text, as the editor does.
   (or open its actions from the palette) for **Show tasks in this
   section**, **group** or **note**.
 
-Opening the view writes nothing, so it shows no message. Back and Forward
-pass through views as through notes: a view sits in the history after the
-note it was opened from. A view is never written to
+Opening the view adds no task write, no message and no saved history entry,
+but it saves the open note's draft first, as leaving a note does; if that
+save fails, the view does not open. It is refused too while the calendar or
+the task form is open ("Close the task form or the calendar first").
+Back and Forward pass through views as through notes: a view sits in the
+history after the note it was opened from, and Back can land on an earlier
+view or on the empty pane. A view is never written to
 [`.wren/workspace.toml`](workspace-folder.md#wrenworkspacetoml), so the
 saved history is what the note visits alone make, and Wren reopens on the
 last note.
 
 The counts follow `task-counts` in [`config.conf`](configuration.md#settings);
 **Toggle task counts** (`view.toggle_task_counts`) in the palette flips it,
-saves it, and shows a message with Undo. The setting hides only the counts;
-the view and Show tasks stay.
+saves it, and shows a message with Undo. If `config.conf` cannot be written
+the counts still change for this session, and the message says so. The
+setting hides only the counts; the view and Show tasks stay.
 
 ### What it shows
 
@@ -348,7 +353,7 @@ has selected), with the current one checked. Under it come the filters:
 
 | Control | Choices |
 |---|---|
-| Status chips | Open, Doing, Done and Cancelled, each with its count. None pressed shows every status; a pressed chip narrows to it, and **Show all** clears them. |
+| Status chips | Open, Doing, Done and Cancelled, each with its count under the other filters. None pressed shows every status; pressed chips together show any of their statuses, and **Show all** clears them. |
 | Owner | Anyone; **Me**, the tasks with no owner or an owner named in `tasks-me`; or one `@name` from the scope's tasks. |
 | Group by | Note (the default), Due date, Priority, or Owner. |
 | Due | Any date, Overdue, Earlier, Today, This week, Next week, Later, or No date. |
@@ -356,7 +361,8 @@ has selected), with the current one checked. Under it come the filters:
 | Hide done after 14 days | On by default. |
 
 - **Me.** A task with no owner is yours, so Me lists those and the tasks
-  that name a `tasks-me` owner. Set `tasks-me = sam, sam.lee` in
+  that name a `tasks-me` owner; all the `tasks-me` names are one group,
+  Me, when grouping by owner. Set `tasks-me = sam, sam.lee` in
   [`config.conf`](configuration.md#settings) for the names you answer to.
   Names are compared without regard to case.
 - **Due buckets.** Weeks run Monday to Sunday. Overdue is unfinished work
@@ -365,8 +371,8 @@ has selected), with the current one checked. Under it come the filters:
   everything beyond. A task with no due date, or one that is not a real
   day, is in No date.
 - **Grouping.** By note, groups follow the tree's order. By due date they
-  are the buckets, by priority Highest to Lowest and No priority, and by
-  owner Me first and then each person by name. A task with several owners
+  are the buckets, by priority Highest to Lowest with No priority between
+  Medium and Low, and by owner Me first and then each person by name. A task with several owners
   is listed under each.
 - **Order.** Within a group, open and doing tasks come before done and
   cancelled ones, overdue first, then by priority (a task with none ranks
@@ -378,14 +384,17 @@ has selected), with the current one checked. Under it come the filters:
 Each filter is remembered for its scope, in
 [`.wren/tasks.toml`](workspace-folder.md#wrentaskstoml), and comes back
 when you open that scope again. A scope with every filter at its default
-leaves no entry.
+leaves no entry. If `.wren/tasks.toml` cannot be written, the filter still
+applies for this session and the message says "The change remains applied;
+task settings were not saved".
 
 A row has the status box, the description with its owners in the owner
 colour, the priority glyph, the due date (red and bold when overdue, a
 warning mark when it is not a real day), and under the description its
 source: the nearest heading when the list is grouped by note (or "Top of
 note"), and otherwise the group, the note and the heading. Done and
-cancelled rows are struck through and dimmed. An empty list says what to
+cancelled rows are struck through and dimmed, their owners in the dimmed
+colour, and the date cell shows the done or cancelled date they carry. An empty list says what to
 change to see tasks again.
 
 The footer counts the open and doing tasks and the overdue ones of the
@@ -453,11 +462,15 @@ Every change from the view is written into the note, and the note's file
 stays the one place the task lives.
 
 - **An open note** is changed through its editor, as one undo step, so its
-  caret, scroll position and undo history stay. The editor remains the
-  only writer of the open note.
+  caret and undo history stay, and on the advanced engine its scroll
+  position too (the classic engine may scroll to show the caret). If the
+  file changed on disk while the note has an unsaved draft, nothing is
+  written: "The open note changed outside Wren; nothing was written, and
+  its draft is kept".
 - **A closed note** is read, changed on the task's line and written back in
-  place, after the open note's draft is saved. No conflict copy is made for
-  these writes.
+  place, after the open note's draft is saved. The write makes no conflict
+  copy of its own note; if saving the open draft needs one, that happens
+  first and the write is blocked.
 - **A row that is out of date** is refused. Wren looks for the task at the
   row's line, then for the one line anywhere in the note that reads the
   same. If it finds none, or cannot tell two apart, or the file changed
@@ -470,57 +483,70 @@ It stays six seconds and the next message replaces it. A refusal is said in
 the message, with no Undo. Undo, from the message or from ⌘Z / Mod+Z, puts
 the line back through the same path and with the same check: if the task
 has changed since, it is refused and forgotten. Undo is Wren's own stack of
-the writes made from the view and the hide actions, a hundred deep, and
-holds until you leave the workspace. In the open note it is one more step of
+task-line and note front-matter writes, a hundred deep, and holds until you
+leave the workspace. In the open note it is one more step of
 the editor's history, not a step back in it.
 
 **Rows stay where they are** until you press `r`, change a filter or the
 scope, or leave the view. A task marked done under the Open chip stays in
 the list, struck through, rather than vanishing under your cursor. A task
-that moves to another line is followed, and a held row is let go when its
-line is gone or appears twice.
+that moves to another line is followed when exactly one line matches; the
+hold is let go when the task is gone or cannot be told from another.
 
 ### Hiding tasks
 
 Some notes hold tasks that are not yours to track: templates, checklists,
-a grocery list. Three layers leave them out of the counts and the view:
+a grocery list. Three layers leave them out of the header counts and the
+list:
 
 - **A note.** `tasks: off` in its front matter hides its tasks. Wren also
   honours Obsidian's `TP_ignore_this_file: true`. `tasks: false` and
   `tasks: no` hide too; any other value hides nothing, and the last
-  occurrence of a key decides.
-  **Hide tasks in this note** (`note.hide_tasks`, a note's actions in the
-  Notes column, and the task menu in the view) writes the line, creating the
-  front matter if there is none, and shows the note's tasks again when it
-  is already hidden (**Show tasks in this note again**). The note's row
-  carries a muted "tasks off" mark.
+  occurrence of a key decides. The note's row carries a muted "tasks off"
+  mark. **Hide tasks in this note** (`note.hide_tasks`, a note's actions in
+  the Notes column) writes the line, creating the front matter if there is
+  none, and the same action reads **Show tasks in this note again** on a
+  hidden note. The task menu in the view only hides.
 - **A group.** **Hide tasks from this group** (`group.hide_tasks`, a group's
   actions) adds it to `exclude` in `.wren/tasks.toml`, which a folder
-  without front matter needs, and **Show this group's tasks again** takes it
-  out. A group is marked "hidden". When its section also hides it, the group
-  offers **Remove this group's own exclusion** and says the section still
-  hides it.
-- **A filter**, the last one: Hide done after 14 days, above.
+  without front matter needs; the group is marked "hidden" and its action
+  reads **Show this group's tasks again**. A group hidden only by its
+  section has no action of its own. When both hide it, the action reads
+  **Remove this group's own exclusion**, and the section still hides it.
+- **A filter**, the last one: Hide done after 14 days, above. It changes the
+  list and the chip counts only, not the header or footer totals, and has
+  no message.
 
-Each action leaves a message with Undo. Hidden notes and groups are left
-out of the counts and the view and named under "Left out", while their
-tasks stay in the workspace index so that owner suggestions still read
-them.
+A hide or show of a note or group, and a counts toggle, each show a message
+with Undo once they succeed. The footer's "Left out" gives totals by reason,
+not the names. Hidden notes and groups keep their tasks in the workspace
+index, so owner suggestions still read them.
 
 Wren changes a note's front matter only when that is unambiguous, because
-front matter is another program's too. It refuses, and says to edit the
-note, when the block has a line that is not a plain key (a quoted key, a
-flow mapping, a merge: any might be `tasks`), when `tasks` is a list, when
-the note begins with `---` and closes it further down without being front
-matter as Wren reads it, when `TP_ignore_this_file` is what hides the note
-(Show is refused, because that line is not Wren's), and when removing the
-block would turn the note's own lines into front matter. Undo puts the front
-matter back as it was, with its line endings, and is refused when the note
-changed so that it would not go back as it was.
+front matter is another program's too, and otherwise writes nothing and says
+to edit the note.
 
-Writing `.wren/tasks.toml` is all or nothing: when it cannot be written,
-nothing changes and the action is refused. With `tasks = off` the file is
-never created, read or written.
+- **Hide** is refused when the block has a top-level line that is not a
+  plain key (a quoted key, a flow mapping, a merge: any might be `tasks`),
+  when `tasks` is a list or another non-switch, and when the note begins with
+  `---` and closes it further down without being front matter as Wren reads
+  it.
+- **Show** removes every `tasks` line that hides, and the block if only blank
+  lines remain. It is refused when `TP_ignore_this_file` is what hides the
+  note ("`TP_ignore_this_file` hides this note's tasks; remove it in the
+  note to show them"), when what is left would stop reading as front matter
+  or make front matter of the note's own lines, or would join a byte-order
+  mark to the text.
+- **Hide, Show and Undo** are all refused when a line break on one side of
+  the change would run into one on the other ("The note's line endings would
+  run together there; edit the note").
+- **Undo** puts the front matter back as it was, with its line endings. If
+  the note changed so that it would not go back as it was, it writes nothing:
+  "This note's front matter changed; nothing was written".
+
+Writing `.wren/tasks.toml` for a hidden group is all or nothing while it is
+unpublished: if the file cannot be written, nothing changes and the action is
+refused. With `tasks = off` Wren neither reads nor writes the file.
 
 ## Which engine
 
