@@ -237,8 +237,13 @@ def test_a_stale_row_is_refused_and_the_list_refreshed(tmp_path: Path) -> None:
         theirs = B_TEXT.replace("Order lunch", "Order dinner")
         (root / B).write_text(theirs, encoding="utf-8")
         listing = press(app, "space")
-        assert disk(root, B) == theirs
-        assert message(app) == CHANGED
+        # Space is refused as stale, unless the watcher's rescan came first
+        # and Space acted on the list as it then was. Their edit is never
+        # lost either way.
+        if message(app) == CHANGED:
+            assert disk(root, B) == theirs
+        else:
+            assert "Order dinner" in disk(root, B)
         listing = wait_for(lambda: (lambda shown: shown if "Order dinner" in descriptions(shown)
                                     else None)(state(app)),
                            timeout=5, description="the list shows the note as it is")
@@ -267,12 +272,14 @@ def test_native_a_click_on_the_box_and_a_right_click_with_its_key(tmp_path: Path
         xdo("click", "3")
         wait_for(lambda: (state(app)["menu"] or {}).get("for") == "row_task", timeout=5,
                  description="a right-click opens the task menu")
+        native.settle_focus()
         native.keys(window, "x")
         wait_for(lambda: disk(root, B)
                  == B_TEXT.replace(LUNCH, "- [x] Order lunch ✅ 2026-11-19"),
                  timeout=5, description="the menu's key writes the row")
         assert state(app)["menu"] is None
         # The undo chord, while the view has the keyboard.
+        native.settle_focus()
         native.keys(window, native_mod("z"))
         wait_for(lambda: disk(root, B) == B_TEXT.replace(LUNCH, "- [/] Order lunch"),
                  timeout=5, description="the undo chord undoes the write")
@@ -351,10 +358,13 @@ def test_a_stale_description_edit_is_refused(tmp_path: Path) -> None:
         app.client.call("tasks.view", {"type": "Order tea"})
         press(app, "enter")
         # Either Enter finds the line changed and refuses, or the watcher's
-        # rescan came first and closed the field, its task gone: nothing is
-        # written either way.
+        # rescan came first and closed the field, its task gone, so Enter
+        # opened the note: nothing is written either way.
         assert disk(root, B) == theirs
-        assert message(app) == CHANGED or describe(app) is None
+        if message(app) != CHANGED:
+            shown = state(app)
+            assert shown is None or shown["describe"] is None
+            return
         wait_for(lambda: "Order dinner" in descriptions(state(app)), timeout=5,
                  description="the list shows the note as it is")
 
