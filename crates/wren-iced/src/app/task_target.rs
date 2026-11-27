@@ -44,7 +44,7 @@ use wren_markdown::task::{self, Change};
 use wren_markdown::Pos;
 
 use super::commands::{Disposition, Gateway};
-use super::App;
+use super::{App, Message};
 
 /// How many writes can be undone.
 const MAX_UNDO: usize = 100;
@@ -171,6 +171,16 @@ impl Refusal {
 pub(super) struct TaskWrite<T> {
     pub result: Result<T, Refusal>,
     pub gateway: Gateway,
+}
+
+impl<T> TaskWrite<T> {
+    /// This write with `first` run before its own task: what was settled
+    /// on the way to it.
+    fn after(mut self, first: iced::Task<Message>) -> Self {
+        let own = std::mem::replace(&mut self.gateway.task, iced::Task::none());
+        self.gateway.task = iced::Task::batch([first, own]);
+        self
+    }
 }
 
 /// The inverse of a write.
@@ -358,7 +368,16 @@ impl App {
 
     /// The note a write is for and whether it is the open one, or why
     /// nothing can be written now.
-    fn task_write_note(&mut self, note: NoteId, stale: &str) -> Result<(RelPath, bool), Refusal> {
+    ///
+    /// `settled` takes the task of whatever had to be settled first (the
+    /// open note's reconciliation with its file), which the caller runs
+    /// whether or not anything is then written.
+    fn task_write_note(
+        &mut self,
+        note: NoteId,
+        stale: &str,
+        settled: &mut iced::Task<Message>,
+    ) -> Result<(RelPath, bool), Refusal> {
         if !self.preferences.tasks {
             return Err(Refusal::blocked("Tasks are off"));
         }
@@ -386,7 +405,7 @@ impl App {
             if self.editor_note != Some(note) {
                 return Err(Refusal::blocked("The editor does not hold the open note"));
             }
-            self.open_note_as_on_disk(note, stale)?;
+            self.open_note_as_on_disk(note, stale, settled)?;
         }
         // A done or cancelled stamp is today's, though the day changed
         // since the timer last looked.
@@ -405,7 +424,17 @@ impl App {
     /// change is planned on that. With a draft, the two are in conflict,
     /// which is the document's own reconciliation to settle: nothing is
     /// written, and the draft is kept.
-    fn open_note_as_on_disk(&mut self, note: NoteId, stale: &str) -> Result<(), Refusal> {
+    ///
+    /// The reconciliation is an action of its own, whose task goes to
+    /// `settled`: it may close a task view whose item is gone, and then
+    /// hands the keyboard to the note, which must happen whatever becomes
+    /// of the write.
+    fn open_note_as_on_disk(
+        &mut self,
+        note: NoteId,
+        stale: &str,
+        settled: &mut iced::Task<Message>,
+    ) -> Result<(), Refusal> {
         let Some(session) = &self.session else {
             return Ok(());
         };
@@ -417,7 +446,8 @@ impl App {
                 "The open note changed outside Wren; nothing was written, and its draft is kept",
             ));
         }
-        let reconciled = self.process_core(Op::Reconcile);
+        let mut reconciled = self.process_core(Op::Reconcile);
+        *settled = std::mem::replace(&mut reconciled.task, iced::Task::none());
         if let Some(error) = closed_error(&reconciled) {
             return Err(Refusal::blocked(error));
         }
@@ -433,10 +463,23 @@ impl App {
     }
 
     fn apply_row(&mut self, target: &RowTarget, change: &RowChange) -> TaskWrite<RowWrite> {
-        let (path, open) = match self.task_write_note(target.note, task_write::CHANGED) {
-            Ok(found) => found,
-            Err(refusal) => return self.task_write_refused(refusal),
+        let mut settled = iced::Task::none();
+        let found = self.task_write_note(target.note, task_write::CHANGED, &mut settled);
+        let written = match found {
+            Ok((path, open)) => self.apply_row_on(target, change, path, open),
+            Err(refusal) => self.task_write_refused(refusal),
         };
+        written.after(settled)
+    }
+
+    /// [`App::apply_row`] to the note at `path`, the open one or not.
+    fn apply_row_on(
+        &mut self,
+        target: &RowTarget,
+        change: &RowChange,
+        path: RelPath,
+        open: bool,
+    ) -> TaskWrite<RowWrite> {
         let line_change = match change {
             RowChange::Change(change) => LineChange::Change {
                 change: change.clone(),
@@ -560,10 +603,23 @@ impl App {
     }
 
     fn apply_switch(&mut self, note: NoteId, change: &SwitchChange) -> TaskWrite<SwitchWrite> {
-        let (path, open) = match self.task_write_note(note, task_write::SWITCH_CHANGED) {
-            Ok(found) => found,
-            Err(refusal) => return self.task_write_refused(refusal),
+        let mut settled = iced::Task::none();
+        let found = self.task_write_note(note, task_write::SWITCH_CHANGED, &mut settled);
+        let written = match found {
+            Ok((path, open)) => self.apply_switch_on(note, change, path, open),
+            Err(refusal) => self.task_write_refused(refusal),
         };
+        written.after(settled)
+    }
+
+    /// [`App::apply_switch`] to the note at `path`, the open one or not.
+    fn apply_switch_on(
+        &mut self,
+        note: NoteId,
+        change: &SwitchChange,
+        path: RelPath,
+        open: bool,
+    ) -> TaskWrite<SwitchWrite> {
         let write = |seen: Option<(String, String)>, warning| {
             let changed = seen.is_some();
             let (before, after) = seen.unwrap_or_default();
@@ -904,8 +960,9 @@ mod tests {
     const ON: &str = "tasks = on\nboards = on\n";
 
     /// An app on a workspace whose group `Work/Tasks` holds the notes `A`
-    /// and `B` with the texts given and the board `Flow`, with `A` open
-    /// and today pinned to Thursday 19 November 2026.
+    /// and `B` with the texts given and the board `Flow`, and whose group
+    /// `Work/Other` holds the note `C`, with `A` open and today pinned to
+    /// Thursday 19 November 2026.
     fn fixture_with(settings: &str, a: &str, b: &str) -> (tempfile::TempDir, App) {
         let directory = crate::test_support::tempdir();
         let root = directory.path().join("workspace");
@@ -913,6 +970,7 @@ mod tests {
             ("Work/Tasks/A.md", a),
             ("Work/Tasks/B.md", b),
             ("Work/Tasks/Flow.wren-board", FLOW),
+            ("Work/Other/C.md", "- [ ] in another group\n"),
         ] {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1539,6 +1597,155 @@ mod tests {
         assert_eq!(refused, Refusal::stale(task_write::SWITCH_CHANGED));
         assert_eq!(app.editor.text(), "- [ ] typed\n");
         assert!(!hidden(&app, "A") && !app.can_undo_task_write());
+
+        // White space typed since would sit after `---` on a line that
+        // still closed the block, for the next change to take away.
+        for typed in [" \t\nbody\n", " "] {
+            let (directory, mut app) = fixture_with(ON, only, only);
+            for title in ["A", "B"] {
+                let shown = app.set_note_tasks_hidden(note(&app, title), false);
+                assert!(shown.result.unwrap().changed);
+            }
+            app.editor.replace_text(typed, true);
+            app.text_changed(Instant::now());
+            std::fs::write(file(&directory, "B"), typed).unwrap();
+            // The closed note's, then the open one's through its editor.
+            for _ in 0..2 {
+                let refused = undo(&mut app).unwrap_err();
+                assert_eq!(
+                    refused,
+                    Refusal::stale(task_write::SWITCH_CHANGED),
+                    "{typed:?}"
+                );
+            }
+            assert_eq!(app.editor.text(), typed);
+            assert_eq!(on_disk(&directory, "B"), typed);
+        }
+    }
+
+    #[test]
+    fn both_writers_refuse_a_block_whose_last_line_break_would_run_into_the_bodys() {
+        let front = "---\ntasks: off\n---\nbody\n";
+        for (directory, mut app) in engines_with(front, front) {
+            let kind = app.editor.backend();
+            for title in ["B", "A"] {
+                let shown = app.set_note_tasks_hidden(note(&app, title), false);
+                assert!(shown.result.unwrap().changed);
+            }
+            // Since then each body has gained a CR-only blank line at its
+            // top. The block's last LF and that CR would read as one line
+            // ending: the Session would write a line fewer, and the
+            // editor would have to change the CR to keep them apart.
+            let odd = "\rbody\n";
+            app.editor.replace_text(odd, true);
+            app.text_changed(Instant::now());
+            std::fs::write(file(&directory, "B"), odd).unwrap();
+            for _ in 0..2 {
+                let refused = undo(&mut app).unwrap_err();
+                assert_eq!(
+                    refused,
+                    Refusal::stale(task_write::SWITCH_CHANGED),
+                    "{kind:?}"
+                );
+            }
+            assert_eq!(app.editor.text(), odd, "{kind:?}");
+            assert_eq!(draft(&app), odd, "{kind:?}");
+            assert_eq!(on_disk(&directory, "B"), odd, "{kind:?}");
+            assert!(!app.can_undo_task_write());
+        }
+    }
+
+    #[test]
+    fn hiding_is_refused_where_the_note_may_have_a_tasks_key_wren_does_not_read() {
+        for front in [
+            // Front matter to another reader, though not to Wren: no
+            // second block goes above it.
+            "---\n\"tasks\": [a, b]\n---\n- [ ] a\n",
+            // Front matter to both, with a key in a spelling Wren cannot
+            // tell from `tasks`.
+            "---\ntitle: A\n\"\\u0074asks\": [a, b]\n---\n- [ ] a\n",
+            "---\ntitle: A\n{tasks: [a]}\n---\n- [ ] a\n",
+        ] {
+            let (directory, mut app) = fixture_with(ON, front, front);
+            for title in ["A", "B"] {
+                let hide = app.set_note_tasks_hidden(note(&app, title), true);
+                let refused = hide.result.unwrap_err();
+                assert!(!refused.refresh, "{title} {front:?}: {refused:?}");
+                assert!(!hidden(&app, title), "{front:?}");
+            }
+            assert_eq!(app.editor.text(), front);
+            assert!(!app.editor.can_undo() && !dirty(&app));
+            assert_eq!(on_disk(&directory, "B"), front);
+            assert!(!app.can_undo_task_write());
+        }
+    }
+
+    #[test]
+    fn showing_is_refused_when_a_mark_in_the_body_would_become_the_files() {
+        let front = "---\ntasks: off\n---\n\u{feff}- [ ] a\n";
+        let (directory, mut app) = fixture_with(ON, front, front);
+        for title in ["A", "B"] {
+            let shown = app.set_note_tasks_hidden(note(&app, title), false);
+            let refused = shown.result.unwrap_err();
+            assert!(
+                !refused.refresh && refused.message.contains("byte order mark"),
+                "{title}: {refused:?}"
+            );
+            assert!(hidden(&app, title));
+        }
+        assert_eq!(app.editor.text(), front);
+        assert!(!app.editor.can_undo() && !dirty(&app));
+        assert_eq!(on_disk(&directory, "B"), front);
+        assert!(!app.can_undo_task_write());
+    }
+
+    #[test]
+    fn what_the_disk_check_settles_hands_the_keyboard_on_whatever_becomes_of_the_write() {
+        // Refused, and written.
+        for refused in [true, false] {
+            let (directory, mut app) = fixture();
+            // The view of another group has the keyboard, over note A.
+            let scope = Scope::Group(RelPath::new("Work/Other").unwrap());
+            let shown = app.dispatch(Command::ShowTasks(scope));
+            assert_eq!(shown.processed.disposition, Disposition::Completed);
+            assert!(app.task_view_has_keys());
+            toggle_row(&mut app, "A", 2).unwrap();
+            assert!(app.process_core(Op::Flush).core_error.is_none());
+            // Outside Wren that group goes, and A is written: its task
+            // changed, or another line of it.
+            std::fs::remove_dir_all(directory.path().join("workspace/Work/Other")).unwrap();
+            let word = if refused {
+                "Mail the deck"
+            } else {
+                "Book the room"
+            };
+            let theirs = on_disk(&directory, "A").replace(word, "theirs");
+            std::fs::write(file(&directory, "A"), &theirs).unwrap();
+
+            // The undo looks at A's file first. That reconciliation finds
+            // the view's group gone, so the note takes the pane, and the
+            // keyboard with it: a task the undo's own gateway carries.
+            let done = app.undo_task_write();
+            assert_eq!(app.surface(), Surface::Text, "the view went with its group");
+            assert_eq!(done.result.is_err(), refused, "{:?}", done.result);
+            assert!(
+                done.gateway.task.units() > 0,
+                "refused {refused}: the focus handoff is not dropped"
+            );
+            if refused {
+                assert_eq!(done.result, Err(stale()));
+                assert_eq!(app.editor.text(), theirs);
+            } else {
+                assert_eq!(app.editor.text(), theirs.replace(MAILED, MAIL));
+            }
+        }
+        // With nothing to settle there is nothing to carry.
+        let (_directory, mut app) = fixture();
+        show(&mut app);
+        let target = row(&app, "A", 2);
+        let done = app.write_task_row(&target, &change(Change::ToggleDone));
+        assert!(done.result.is_ok());
+        assert_eq!(done.gateway.task.units(), 0);
     }
 
     #[test]
