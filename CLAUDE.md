@@ -108,13 +108,15 @@ when one lands, move what users need into `docs/` and trim the note.
     footer), `list_keys.rs` (the view's key wrapper), `app/host_menu.rs`
     (a menu the app draws over the view), `app/task_target.rs` (the one
     write path for a row or the open note, and undo), `app/task_rows.rs`
-    (a row's keys, clicks and writes), `app/task_entry.rs` (header counts,
+    (a row's keys, clicks and writes), `app/task_describe.rs` (a row's
+    description edited in place), `app/task_entry.rs` (header counts,
     Show tasks, the two hides and their marks), `app/notice.rs` (the
     message with Undo), `app/tasks_harness.rs` (the `tasks.*` test requests)
     and `app/tasks_baseline.rs` (the pinned behaviour with tasks off).
   - Widgets: `panes.rs` (resize), `drag*.rs` (drag and drop),
     `ellipsis.rs`, `keys.rs`, `field_keys.rs` (the text fields' editing
-    keys, from the keymap), and `layers.rs` (a stack whose layers
+    keys, from the keymap), `line_field.rs` (a one-line field that hands
+    Enter and Escape to its host), and `layers.rs` (a stack whose layers
     all hear a press something before them took).
   - `macos_menu.rs` is the native menu bar, built from the table in
     `menu.rs`, which is compiled on macOS, in tests and with `smoke-test`

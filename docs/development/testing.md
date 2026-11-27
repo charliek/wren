@@ -422,7 +422,10 @@ has the keyboard, as its key wrapper and then the app hear it, and
 `{"click": …}` clicks a control, or with `{"click": {"cell": {"row": 0,
 "cell": "box" | "priority" | "due"}}}` a cell of a row, `{"click": {"right":
 0}}` right-clicks a row, `{"click": {"menu": "Done"}}` presses a row of the
-menu over the view (rows count from zero), and with
+menu over the view (rows count from zero), `{"click": {"describe": 0}}`
+double-clicks a row's description to edit it (as `{"key": {"key": "f2"}}`
+does on the selected row), `{"type": text}` sets the open field's text as a
+paste or an input method's commit does, and with
 `{"list": true}` the answer adds the list's state: its filters, chips,
 groups, rows (with whether each is held in place), counts, focus, open menu,
 and where the controls were drawn. `{"write": {"path": "Work/A.md", "line":
