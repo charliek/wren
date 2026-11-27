@@ -57,7 +57,8 @@
 //! The view's own writes (item 10.4) are its keys (`{"key": …}`) and its
 //! clicks: `{"click": {"cell": {"row": n, "cell": "box" | "priority" |
 //! "due"}}}` clicks a cell of the nth row and `{"click": {"right": n}}`
-//! right-clicks it. With `{"list": true}` each row says whether it is
+//! right-clicks it; `{"click": {"menu": label}}` presses a row of the menu
+//! over the view and releases it, as a pointer does. With `{"list": true}` each row says whether it is
 //! `held` where a write left it, and where it and its cells were drawn
 //! (`bounds`, `cells`).
 
@@ -757,10 +758,30 @@ impl App {
             return Err("click needs control, row, source, right, cell, menu or outside".into());
         };
         let serial = self.task_list.next_serial();
-        Ok(self.update(Message::TaskView(Event::Click {
+        // A row of the menu is chosen as a pointer chooses it: a press on
+        // it, then its release.
+        let pressed = match &event {
+            Click::Menu(super::host_menu::Event::Choose { instance, row }) => {
+                let menu = self.task_list.menu.as_ref().ok_or("No menu is open")?;
+                let at = (menu.row_bounds(*row, self.viewport))
+                    .ok_or("the row is not drawn")?
+                    .center();
+                self.update(Message::TaskView(Event::Click {
+                    serial,
+                    click: Click::Menu(super::host_menu::Event::Pressed {
+                        instance: *instance,
+                        at,
+                        primary: true,
+                    }),
+                }))
+            }
+            _ => Task::none(),
+        };
+        let clicked = self.update(Message::TaskView(Event::Click {
             serial,
             click: event,
-        })))
+        }));
+        Ok(Task::batch([pressed, clicked]))
     }
 
     /// The task view's list, its filters, its menu and where its controls

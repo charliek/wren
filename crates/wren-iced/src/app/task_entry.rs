@@ -358,13 +358,25 @@ impl App {
     /// Hide the tasks in `note` (`hide`), or show them again, saying so in
     /// a message whose Undo puts the front matter back.
     pub(super) fn hide_note_tasks(&mut self, note: NoteId, hide: bool) -> Gateway {
+        let written = self.set_note_tasks_hidden(note, hide);
+        self.say_switched(note, hide, &written);
+        written.gateway
+    }
+
+    /// The message after the tasks in `note` were hidden (`hide`) or shown
+    /// again by `written`, with Undo; none when nothing was written.
+    pub(super) fn say_switched(
+        &mut self,
+        note: NoteId,
+        hide: bool,
+        written: &super::task_target::TaskWrite<super::task_target::SwitchWrite>,
+    ) {
         let hidden = !hide;
         let title = self
             .model()
             .and_then(|model| model.note(note))
             .map(|note| note.title.clone())
             .unwrap_or_default();
-        let written = self.set_note_tasks_hidden(note, hide);
         if let Ok(write) = &written.result {
             if write.changed {
                 let parts = if hidden {
@@ -387,7 +399,6 @@ impl App {
                 });
             }
         }
-        written.gateway
     }
 }
 

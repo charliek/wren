@@ -315,7 +315,25 @@ impl App {
         } else {
             SwitchChange::Show
         };
-        let written = self.apply_switch(note, &change);
+        self.switch_recorded(note, &change)
+    }
+
+    /// "Hide tasks in <note>" from a row of the task view: hidden only
+    /// while the row's task is in the note as it is read for the change,
+    /// after the open note is brought in step with its file; refused as the
+    /// row's change is when it has gone or is there twice. Undone as a hide
+    /// is.
+    pub(super) fn hide_tasks_for_row(&mut self, target: &RowTarget) -> TaskWrite<SwitchWrite> {
+        let change = SwitchChange::HideFor {
+            line: target.line,
+            expect: target.expect.clone(),
+        };
+        self.switch_recorded(target.note, &change)
+    }
+
+    /// [`App::apply_switch`], its inverse recorded when it wrote.
+    fn switch_recorded(&mut self, note: NoteId, change: &SwitchChange) -> TaskWrite<SwitchWrite> {
+        let written = self.apply_switch(note, change);
         if let Ok(write) = &written.result {
             if write.changed {
                 self.task_writes.record(Inverse::Switch {
@@ -624,7 +642,7 @@ impl App {
 
     fn apply_switch(&mut self, note: NoteId, change: &SwitchChange) -> TaskWrite<SwitchWrite> {
         let mut settled = iced::Task::none();
-        let found = self.task_write_note(note, task_write::SWITCH_CHANGED, &mut settled);
+        let found = self.task_write_note(note, switch_stale(change), &mut settled);
         let written = match found {
             Ok((path, open)) => self.apply_switch_on(note, change, path, open),
             Err(refusal) => self.task_write_refused(refusal),
@@ -676,7 +694,7 @@ impl App {
                 Some((before, after)),
                 gateway.processed.warning.clone(),
             )),
-            Some(Seen::Stale) => Err(Refusal::stale(task_write::SWITCH_CHANGED)),
+            Some(Seen::Stale) => Err(Refusal::stale(switch_stale(change))),
             Some(Seen::Line { .. } | Seen::Kept { .. }) | None => match closed_error(&gateway) {
                 Some(error) => Err(Refusal::blocked(error)),
                 None => Ok(write(None, None)),
@@ -694,7 +712,7 @@ impl App {
         let started = Instant::now();
         let source = self.editor.text();
         let plan = task_write::plan_switch(&source, change)
-            .map_err(|refused| Refusal::of(refused, task_write::SWITCH_CHANGED))?;
+            .map_err(|refused| Refusal::of(refused, switch_stale(change)))?;
         let Some(plan) = plan else {
             return Ok(None);
         };
@@ -728,6 +746,15 @@ impl App {
     /// (`process_events`).
     pub(super) fn task_write_seen(&mut self, seen: Seen) {
         self.task_writes.seen = Some(seen);
+    }
+}
+
+/// What a switch's change says when what it expects has gone: a row's
+/// task, or the front matter.
+fn switch_stale(change: &SwitchChange) -> &'static str {
+    match change {
+        SwitchChange::HideFor { .. } => task_write::CHANGED,
+        _ => task_write::SWITCH_CHANGED,
     }
 }
 

@@ -238,19 +238,28 @@ impl Hold {
         record.note == self.note && record.line == self.line && record.source == self.source
     }
 
-    /// Find the task held among `records` (the scope's): on its line, or
-    /// the one line of the note that reads as it does. `false` when it is
-    /// there no more, or twice elsewhere: the hold is let go.
-    pub fn relocate<'a>(&mut self, records: impl Iterator<Item = &'a TaskRecord>) -> bool {
-        let found: Vec<usize> = records
-            .filter(|record| record.note == self.note && record.source == self.source)
-            .map(|record| record.line)
-            .collect();
+    /// Find the task held among `current` (the scope's tasks now), with
+    /// `previous` those the list was built from: on its line, or else the
+    /// one line of the note that reads as it does, when no other task read
+    /// so before (that one is another task, which the held one cannot be
+    /// told from). `false` when the task cannot be traced: the hold is let
+    /// go.
+    pub fn relocate<'a>(
+        &mut self,
+        previous: impl Iterator<Item = &'a TaskRecord>,
+        current: impl Iterator<Item = &'a TaskRecord>,
+    ) -> bool {
+        let same = |record: &&TaskRecord| record.note == self.note && record.source == self.source;
+        let found: Vec<usize> = current.filter(same).map(|record| record.line).collect();
         if found.contains(&self.line) {
             return true;
         }
+        let others = previous
+            .filter(same)
+            .filter(|record| record.line != self.line)
+            .count();
         match found.as_slice() {
-            [line] => {
+            [line] if others == 0 => {
                 self.line = *line;
                 true
             }

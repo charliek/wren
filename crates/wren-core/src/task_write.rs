@@ -51,6 +51,10 @@ pub enum SwitchChange {
     Hide,
     /// Take it out again.
     Show,
+    /// Hide, asked from a row of a view: only while the task the row showed
+    /// is in the note as it is read for the change ([`locate`]), so a row
+    /// whose task has gone hides nothing.
+    HideFor { line: usize, expect: String },
     /// Put the front matter back as it was before a change: what undoing
     /// one writes ([`restore_switch`]).
     Restore { expect: String, replace: String },
@@ -793,6 +797,10 @@ pub fn plan_switch(source: &str, change: &SwitchChange) -> Result<Option<SwitchW
     let write = match change {
         SwitchChange::Hide => set_hidden(source, true)?,
         SwitchChange::Show => set_hidden(source, false)?,
+        SwitchChange::HideFor { line, expect } => {
+            locate(source, *line, expect).ok_or(Refused::Changed)?;
+            set_hidden(source, true)?
+        }
         SwitchChange::Restore { expect, replace } => Some(restore_switch(source, expect, replace)?),
     };
     Ok(write.filter(|write| write.before != write.after))
@@ -801,6 +809,29 @@ pub fn plan_switch(source: &str, change: &SwitchChange) -> Result<Option<SwitchW
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rows_hide_needs_the_rows_task_where_the_note_has_it() {
+        let hide = |line: usize, expect: &str| SwitchChange::HideFor {
+            line,
+            expect: expect.into(),
+        };
+        let note = "# B\n\n- [ ] Lunch\n- [ ] Tea\n";
+        let write = plan_switch(note, &hide(2, "- [ ] Lunch")).unwrap().unwrap();
+        assert_eq!(write.apply(note), format!("---\ntasks: off\n---\n{note}"));
+        // Moved, it is found; gone, or there twice off its line, nothing is
+        // written.
+        assert!(plan_switch(note, &hide(3, "- [ ] Lunch")).is_ok());
+        assert_eq!(
+            plan_switch(note, &hide(2, "- [ ] Cake")),
+            Err(Refused::Changed)
+        );
+        let twice = "# B\n\n- [ ] Dinner\n- [ ] Lunch\n- [ ] Lunch\n";
+        assert_eq!(
+            plan_switch(twice, &hide(2, "- [ ] Lunch")),
+            Err(Refused::Changed)
+        );
+    }
 
     /// Thursday 19 November 2026, the design page's day.
     fn today() -> Date {

@@ -274,6 +274,8 @@ pub(super) struct ListState {
     /// A key reached the menu over the view in that batch: no press after
     /// it there chooses a row (discovery/tasks.md §6.2).
     menu_keyed: bool,
+    /// The menu and row a press over the card may choose at its release.
+    armed: Option<(u64, u32)>,
     /// The app's copies still to come of the batch's Escapes and
     /// shortcuts, in order, each with whether it is dropped.
     copies: std::collections::VecDeque<(AppCopy, bool)>,
@@ -475,7 +477,10 @@ impl App {
         {
             if let Some(tasks) = self.session.as_ref().and_then(|session| session.tasks()) {
                 let prefix = scope.prefix();
-                (self.task_list.held).retain_mut(|hold| hold.relocate(tasks.tasks_under(prefix)));
+                let list = &mut self.task_list;
+                let previous = &list.listing.records;
+                (list.held)
+                    .retain_mut(|hold| hold.relocate(previous.iter(), tasks.tasks_under(prefix)));
             }
         }
         let Some(session) = &self.session else {
@@ -704,6 +709,11 @@ impl App {
             }
             return Task::none();
         }
+        // Any key that reaches an open menu, a chord it holds included,
+        // leaves no press after it in the batch a choice.
+        if self.task_list.menu.is_some() {
+            self.task_list.menu_keyed = true;
+        }
         match copy {
             // Escape is read here, in its place: it closes the menu, which
             // stops the batch, or gives a control's keyboard back to the
@@ -774,14 +784,8 @@ impl App {
                 press.text.as_deref(),
             ) {
                 MenuKey::Choose(row) => (self.choose_task_menu(row), true),
-                MenuKey::Moved => {
-                    self.task_list.menu_keyed = true;
-                    (self.reveal_task_menu(), false)
-                }
-                MenuKey::Held => {
-                    self.task_list.menu_keyed = true;
-                    (Task::none(), false)
-                }
+                MenuKey::Moved => (self.reveal_task_menu(), false),
+                MenuKey::Held => (Task::none(), false),
             };
         }
         if press.key == Key::Named(Named::Tab) {
@@ -1251,10 +1255,47 @@ impl App {
                 self.task_list.height = Some(height);
                 Task::none()
             }
+            // A row of the menu released on: chosen only when its press was
+            // allowed to choose it, as it was decided at the press.
+            Event::Click {
+                click: Click::Menu(host_menu::Event::Choose { instance, row }),
+                ..
+            } => {
+                self.task_list.stopped = true;
+                if self.task_list.armed.take() != Some((instance, row)) {
+                    return Task::none();
+                }
+                let chosen =
+                    (self.task_list.menu.as_ref()).and_then(|menu| menu.choose(instance, row));
+                match chosen {
+                    Some(row) => self.choose_task_menu(row),
+                    None => Task::none(),
+                }
+            }
             Event::Click { click, .. } => {
                 // A press ends what its batch may still do; one after
-                // something opened in the batch is dropped.
-                if std::mem::replace(&mut self.task_list.stopped, true) {
+                // something opened in the batch, or after another press, is
+                // dropped.
+                let first = !std::mem::replace(&mut self.task_list.stopped, true);
+                // A press over the menu's card may choose the row it is on
+                // at its release: only the batch's first press, of the
+                // primary button, with no key reaching the menu before it.
+                if let Click::Menu(host_menu::Event::Pressed {
+                    instance,
+                    at,
+                    primary,
+                }) = click
+                {
+                    let window = self.viewport;
+                    self.task_list.armed = (first && primary && !self.task_list.menu_keyed)
+                        .then_some(self.task_list.menu.as_ref())
+                        .flatten()
+                        .filter(|menu| menu.instance() == instance)
+                        .and_then(|menu| menu.row_at(at, window))
+                        .map(|row| (instance, row));
+                    return Task::none();
+                }
+                if !first {
                     return Task::none();
                 }
                 self.task_list_click(click)
@@ -1324,19 +1365,6 @@ impl App {
                 Task::batch([task, self.column_focus()])
             }
             Click::Menu(event) => match event {
-                host_menu::Event::Choose { instance, row } => {
-                    // A key reached the menu first in this batch: the
-                    // press was aimed at a menu the user had not seen.
-                    if self.task_list.menu_keyed {
-                        return Task::none();
-                    }
-                    let chosen =
-                        (self.task_list.menu.as_ref()).and_then(|menu| menu.choose(instance, row));
-                    match chosen {
-                        Some(row) => self.choose_task_menu(row),
-                        None => Task::none(),
-                    }
-                }
                 host_menu::Event::Outside { instance } => {
                     if (self.task_list.menu.as_ref())
                         .is_some_and(|menu| menu.instance() == instance)
@@ -1345,7 +1373,9 @@ impl App {
                     }
                     Task::none()
                 }
-                host_menu::Event::Scrolled { .. } => Task::none(),
+                host_menu::Event::Scrolled { .. }
+                | host_menu::Event::Pressed { .. }
+                | host_menu::Event::Choose { .. } => Task::none(),
             },
         }
     }
@@ -2112,8 +2142,28 @@ mod tests {
         click(app, Click::Control(control));
     }
 
+    /// Input from the menu over the view; a row chosen is pressed and then
+    /// released, as a pointer chooses it.
     fn menu_event(app: &mut App, event: host_menu::Event) {
-        click(app, Click::Menu(event));
+        let serial = app.task_list.next_serial();
+        if let host_menu::Event::Choose { instance, row } = event {
+            let window = app.viewport;
+            let at = (app.task_list.menu.as_ref())
+                .and_then(|menu| menu.row_bounds(row, window))
+                .map_or(iced::Point::ORIGIN, |bounds| bounds.center());
+            let _ = app.update(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Menu(host_menu::Event::Pressed {
+                    instance,
+                    at,
+                    primary: true,
+                }),
+            }));
+        }
+        let _ = app.update(Message::TaskView(Event::Click {
+            serial,
+            click: Click::Menu(event),
+        }));
     }
 
     /// The chord of `action`, as the keymap binds it, with Ctrl or Alt.

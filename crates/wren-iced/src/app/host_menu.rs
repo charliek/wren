@@ -18,10 +18,13 @@
 //!   choice (`App::take_escape_claim`'s precedence).
 //! - A press outside the card closes the menu and is dropped: the layer
 //!   under the card takes it, so nothing beneath hears it.
-//! - A press on a row chooses it as it comes, not at its release; the host
-//!   refuses a press that follows a key the menu took in the same batch
-//!   (discovery/tasks.md §6.2). Every press and release over the card is
-//!   the card's.
+//! - A row is chosen when a press on it is released over it (a touch: a
+//!   tap, so a drag still scrolls a long menu). Every press over the card,
+//!   of any button, is reported as it comes ([`Event::Pressed`]), so the
+//!   host can refuse a press that is not the first of its batch or that
+//!   follows a key the menu took in that batch (discovery/tasks.md §6.2);
+//!   a refused press chooses nothing at its release. Every press and its
+//!   release over the card are the card's: nothing beneath hears either.
 
 use iced::keyboard::key::{Named, Physical};
 use iced::keyboard::{Key, Modifiers};
@@ -48,7 +51,15 @@ const TEXT_SIZE: f32 = 13.0;
 /// Input from a host menu's card.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
-    /// The row `row` was clicked in the menu `instance`.
+    /// A press over the card of the menu `instance`, at `at` in the
+    /// window: `primary` for the left button or a touch.
+    Pressed {
+        instance: u64,
+        at: Point,
+        primary: bool,
+    },
+    /// The row `row` of the menu `instance` was released on after a press
+    /// on it.
     Choose { instance: u64, row: u32 },
     /// A press, or a scroll, outside the card.
     Outside { instance: u64 },
@@ -135,6 +146,43 @@ impl<T> HostMenu<T> {
 
     pub fn instance(&self) -> u64 {
         self.instance
+    }
+
+    /// The row a press at `at` falls on, in a window of `window`'s size:
+    /// its id, when it can be chosen.
+    pub fn row_at(&self, at: Point, window: Size) -> Option<u32> {
+        let bounds = self.bounds(window);
+        if !bounds.contains(at) {
+            return None;
+        }
+        let title = if self.title.is_some() {
+            TITLE_HEIGHT
+        } else {
+            0.0
+        };
+        let y = at.y - bounds.y - PADDING - title + self.scroll;
+        if y < 0.0 {
+            return None;
+        }
+        let row = self.rows.get((y / ROW_HEIGHT) as usize)?;
+        row.enabled.then_some(row.id)
+    }
+
+    /// Where the row `id` is drawn, with the rows scrolled as they are.
+    #[cfg(any(test, feature = "smoke-test"))]
+    pub fn row_bounds(&self, id: u32, window: Size) -> Option<Rectangle> {
+        let bounds = self.bounds(window);
+        let index = self.rows.iter().position(|row| row.id == id)?;
+        let title = if self.title.is_some() {
+            TITLE_HEIGHT
+        } else {
+            0.0
+        };
+        let y = bounds.y + PADDING + title + index as f32 * ROW_HEIGHT - self.scroll;
+        Some(Rectangle::new(
+            Point::new(bounds.x + PADDING, y),
+            Size::new(bounds.width - 2.0 * PADDING, ROW_HEIGHT),
+        ))
     }
 
     /// Select the row `id`, when it can be chosen.
@@ -343,15 +391,7 @@ impl<T> HostMenu<T> {
                 instance,
                 row: entry.id,
             });
-            // A row is chosen as the press comes, in its batch's order (the
-            // app refuses a press after a key reached the menu in that batch,
-            // discovery/tasks.md §6.2): the area takes the press before the
-            // button, which only draws the row, can.
-            let mut area = mouse_area(container(line).height(ROW_HEIGHT).center_y(ROW_HEIGHT));
-            if enabled {
-                area = area.on_press(choose.clone());
-            }
-            let line = button(area)
+            let line = button(container(line).height(ROW_HEIGHT).center_y(ROW_HEIGHT))
                 .padding(0)
                 .width(Fill)
                 .on_press_maybe(enabled.then_some(choose))
@@ -406,6 +446,13 @@ impl<T> HostMenu<T> {
                 ..chrome::surface(definition, colors.raised, 8.0, true)
             });
         let card = mouse_area(card).on_scroll(move |_| send(Event::Outside { instance }));
+        let card = presses(card, move |at, primary| {
+            send(Event::Pressed {
+                instance,
+                at,
+                primary,
+            })
+        });
         (
             opaque(scrim),
             pin(opaque(card)).x(bounds.x).y(bounds.y).into(),
@@ -428,6 +475,191 @@ fn place(anchor: Rectangle, size: Size, window: Size) -> Point {
     let y = y.min(bottom - size.height).max(MARGIN);
     let x = anchor.x.min(window.width - MARGIN - size.width).max(MARGIN);
     Point::new(x, y)
+}
+
+/// `content`, reporting each press over it as it comes (`on_press` with
+/// the press's place and whether it is the primary button or a touch),
+/// before its own widgets see it, and capturing the release of each press
+/// it saw after they have.
+fn presses<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    on_press: impl Fn(Point, bool) -> M + 'a,
+) -> Element<'a, M> {
+    Element::new(Presses {
+        content: content.into(),
+        on_press: Box::new(on_press),
+    })
+}
+
+struct Presses<'a, M> {
+    content: Element<'a, M>,
+    on_press: Box<dyn Fn(Point, bool) -> M + 'a>,
+}
+
+/// The presses over the card not yet released.
+#[derive(Default)]
+struct Held {
+    buttons: Vec<iced::mouse::Button>,
+    fingers: Vec<iced::touch::Finger>,
+}
+
+impl<M> iced::advanced::Widget<M, iced::Theme, iced::Renderer> for Presses<'_, M> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<Held>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(Held::default())
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<iced::Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, M>,
+        viewport: &Rectangle,
+    ) {
+        use iced::{mouse, touch};
+        let bounds = layout.bounds();
+        let held = tree.state.downcast_mut::<Held>();
+        let mut release = false;
+        match event {
+            iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                if let Some(at) = cursor.position_over(bounds) {
+                    held.buttons.push(*button);
+                    shell.publish((self.on_press)(at, *button == mouse::Button::Left));
+                }
+            }
+            iced::Event::Touch(touch::Event::FingerPressed { id, position })
+                if bounds.contains(*position) =>
+            {
+                held.fingers.push(*id);
+                shell.publish((self.on_press)(*position, true));
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                if let Some(at) = held.buttons.iter().position(|held| held == button) {
+                    held.buttons.remove(at);
+                    release = true;
+                }
+            }
+            iced::Event::Touch(
+                touch::Event::FingerLifted { id, .. } | touch::Event::FingerLost { id, .. },
+            ) => {
+                if let Some(at) = held.fingers.iter().position(|held| held == id) {
+                    held.fingers.remove(at);
+                    release = true;
+                }
+            }
+            _ => {}
+        }
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        if release {
+            shell.capture_event();
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, M, iced::Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
 }
 
 #[cfg(test)]

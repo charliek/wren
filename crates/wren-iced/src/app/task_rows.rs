@@ -42,7 +42,6 @@
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
 use iced::{Rectangle, Task};
-use wren_core::task_write;
 use wren_editor::{Accelerator, Row};
 use wren_markdown::date::Date;
 use wren_markdown::status::{self, StatusType};
@@ -265,11 +264,12 @@ impl App {
         change: Change,
         what: What,
     ) -> TaskWrite<RowWrite> {
-        let places = self.hold_places(target);
+        let listed = self.listed_line(target);
+        let places = self.hold_places(target, listed);
         let written = self.write_task_row(target, &RowChange::Change(change));
         match &written.result {
             Ok(write) if write.changed => {
-                self.hold_row(places, target, write);
+                self.hold_row(places, target, listed, write);
                 let words = format!(
                     "{} \u{b7} wrote line {} of {}",
                     what.label(&write.after, boxed),
@@ -318,9 +318,21 @@ impl App {
         match &undone.result {
             Ok(done) => {
                 if let Undone::Line(write) = done {
-                    let held = (self.task_list.held.iter_mut())
-                        .find(|hold| hold.note == write.note && hold.source == write.before);
-                    if let Some(hold) = held {
+                    // The hold of the line undone: on that line, else the one
+                    // hold that reads as the undo found it.
+                    let held = &mut self.task_list.held;
+                    let reads =
+                        |hold: &Hold| hold.note == write.note && hold.source == write.before;
+                    let at = (held.iter())
+                        .position(|hold| reads(hold) && hold.line == write.line)
+                        .or_else(|| {
+                            let mut found = held.iter().enumerate().filter(|(_, hold)| reads(hold));
+                            match (found.next(), found.next()) {
+                                (Some((at, _)), None) => Some(at),
+                                _ => None,
+                            }
+                        });
+                    if let Some(hold) = at.map(|at| &mut held[at]) {
                         hold.line = write.line;
                         hold.source.clone_from(&write.after);
                     }
@@ -338,17 +350,42 @@ impl App {
         undone.gateway
     }
 
-    /// Where each row of the task `target` stands in the list as shown:
-    /// what holds them there once it is written.
-    fn hold_places(&self, target: &RowTarget) -> Vec<Place> {
+    /// The line the list as shown has the task `target` on: its own line
+    /// while it reads as expected there, else the one line of its note that
+    /// does.
+    fn listed_line(&self, target: &RowTarget) -> Option<usize> {
+        let records = &self.task_list.listing.records;
+        let reads = |record: &&wren_core::tasks::TaskRecord| {
+            record.note == target.note && record.source == target.expect
+        };
+        if records
+            .iter()
+            .any(|record| reads(&record) && record.line == target.line)
+        {
+            return Some(target.line);
+        }
+        let mut found = records.iter().filter(reads);
+        match (found.next(), found.next()) {
+            (Some(record), None) => Some(record.line),
+            _ => None,
+        }
+    }
+
+    /// Where each row of the task on `line` of the note `target` names
+    /// stands in the list as shown: what holds them there once it is
+    /// written.
+    fn hold_places(&self, target: &RowTarget, line: Option<usize>) -> Vec<Place> {
         let listing = &self.task_list.listing;
+        let Some(line) = line else {
+            return Vec::new();
+        };
         (listing.rows())
             .filter_map(|entry| {
                 let Entry::Row { group, record } = listing.entries[entry] else {
                     return None;
                 };
                 let found = &listing.records[record];
-                if found.note != target.note || found.line != target.line {
+                if found.note != target.note || found.line != line {
                     return None;
                 }
                 let group = &listing.groups[group];
@@ -361,13 +398,22 @@ impl App {
             .collect()
     }
 
-    /// Hold the task `target`, written as `write`: where its rows stood
-    /// when it was first written since the list was refreshed, expecting
-    /// the line the write left.
-    fn hold_row(&mut self, places: Vec<Place>, target: &RowTarget, write: &RowWrite) {
+    /// Hold the task `target`, shown on `listed` and written as `write`:
+    /// where its rows stood when it was first written since the list was
+    /// refreshed, expecting the line the write left.
+    fn hold_row(
+        &mut self,
+        places: Vec<Place>,
+        target: &RowTarget,
+        listed: Option<usize>,
+        write: &RowWrite,
+    ) {
+        let Some(line) = listed else {
+            return;
+        };
         let held = &mut self.task_list.held;
         let kept = held.iter_mut().find(|hold| {
-            hold.note == target.note && hold.line == target.line && hold.source == target.expect
+            hold.note == target.note && hold.line == line && hold.source == target.expect
         });
         match kept {
             Some(hold) => {
@@ -382,7 +428,7 @@ impl App {
             }),
             None => {}
         }
-        self.rekey_selection(target.note, target.line, write.line, &write.after);
+        self.rekey_selection(target.note, line, write.line, &write.after);
     }
 
     /// The selection on the task at `line` of `note` follows it to `moved`,
@@ -506,16 +552,6 @@ impl App {
         listing.find(&key, None)
     }
 
-    /// Whether the task index still lists the task `target` expects.
-    fn still_listed(&self, target: &RowTarget) -> bool {
-        let tasks = self.session.as_ref().and_then(|session| session.tasks());
-        tasks.is_some_and(|tasks| {
-            tasks
-                .tasks_under(None)
-                .any(|record| record.note == target.note && record.source == target.expect)
-        })
-    }
-
     /// Act on the row `row` of a row's menu, opened for `target`, whose box
     /// is at byte `boxed` of its line.
     pub(super) fn choose_row_menu(
@@ -534,15 +570,14 @@ impl App {
         match row {
             OPEN_ROW => entry.map_or_else(Task::none, |entry| self.open_task_at(entry)),
             HIDE_ROW => {
-                // A row whose task has gone hides nothing.
-                if !self.still_listed(target) {
-                    self.refused_in_view(&Refusal {
-                        message: task_write::CHANGED.into(),
-                        refresh: true,
-                    });
-                    return Task::none();
+                // Only while the row's task is in the note as the hide reads
+                // it: a row whose task has gone hides nothing.
+                let written = self.hide_tasks_for_row(target);
+                match &written.result {
+                    Ok(_) => self.say_switched(target.note, true, &written),
+                    Err(refusal) => self.refused_in_view(refusal),
                 }
-                self.hide_note_tasks(target.note, true).task
+                written.gateway.task
             }
             id => match TaskRow::from_id(id) {
                 Some(chosen) => match chosen.act() {
@@ -801,16 +836,41 @@ mod tests {
         menu.rows().iter().map(|row| row.label.clone()).collect()
     }
 
-    fn choose(app: &mut App, label: &str) {
+    /// The menu's row `label`: its id, and where its middle is drawn.
+    fn menu_row(app: &App, label: &str) -> (u64, u32, iced::Point) {
         let menu = app.task_list.menu.as_ref().expect("a menu is open");
         let row = (menu.rows().iter())
             .find(|row| row.label.starts_with(label))
             .unwrap_or_else(|| panic!("no row {label:?}"));
-        let event = host_menu::Event::Choose {
-            instance: menu.instance(),
-            row: row.id,
-        };
-        click(app, Click::Menu(event));
+        let at = menu.row_bounds(row.id, app.viewport).unwrap().center();
+        (menu.instance(), row.id, at)
+    }
+
+    /// A press on the menu's row `label`, of the primary button or not, in
+    /// the batch `serial`.
+    fn press_row(app: &mut App, serial: u64, label: &str, primary: bool) {
+        let (instance, _, at) = menu_row(app, label);
+        let click = Click::Menu(host_menu::Event::Pressed {
+            instance,
+            at,
+            primary,
+        });
+        let _ = app.update(Message::TaskView(Event::Click { serial, click }));
+    }
+
+    /// The release of a press on the menu's row `label`, in the batch
+    /// `serial`.
+    fn release_row(app: &mut App, serial: u64, label: &str) {
+        let (instance, row, _) = menu_row(app, label);
+        let click = Click::Menu(host_menu::Event::Choose { instance, row });
+        let _ = app.update(Message::TaskView(Event::Click { serial, click }));
+    }
+
+    /// The menu's row `label` pressed and released in a batch of its own.
+    fn choose(app: &mut App, label: &str) {
+        let serial = app.task_list.next_serial();
+        press_row(app, serial, label, true);
+        release_row(app, serial, label);
     }
 
     fn undo_by_notice(app: &mut App) {
@@ -1261,25 +1321,35 @@ mod tests {
         let (directory, mut app) = fixture();
         select(&mut app, "Order lunch");
         batch(&mut app, &[letter("s")]);
-        let menu = app.task_list.menu.as_ref().unwrap();
-        let done = (menu.rows().iter())
-            .find(|row| row.label == "Done")
-            .unwrap()
-            .id;
-        let event = host_menu::Event::Choose {
-            instance: menu.instance(),
-            row: done,
-        };
+        // [Down, press on Done, release].
         let serial = app.task_list.next_serial();
         in_batch(&mut app, serial, &[down()]);
-        let _ = app.update(Message::TaskView(Event::Click {
-            serial,
-            click: Click::Menu(event),
-        }));
+        press_row(&mut app, serial, "Done", true);
+        release_row(&mut app, serial, "Done");
         assert_eq!(on_disk(&directory, "B"), B);
         assert!(app.task_list.menu.is_some());
-        // In a batch of its own, the press chooses.
-        click(&mut app, Click::Menu(event));
+        // [Mod+Z, which the open menu holds, press on Done]: its release
+        // in the next batch chooses nothing either.
+        let serial = app.task_list.next_serial();
+        let undo = undo_key(&app);
+        in_batch(&mut app, serial, &[undo]);
+        press_row(&mut app, serial, "Done", true);
+        let serial = app.task_list.next_serial();
+        release_row(&mut app, serial, "Done");
+        assert_eq!(on_disk(&directory, "B"), B);
+        // [right press, left press on Done]: only the first press of a
+        // batch may choose.
+        let serial = app.task_list.next_serial();
+        press_row(&mut app, serial, "Done", false);
+        press_row(&mut app, serial, "Done", true);
+        release_row(&mut app, serial, "Done");
+        assert_eq!(on_disk(&directory, "B"), B);
+        assert!(app.task_list.menu.is_some());
+        // A press of its own, released in the next batch, chooses.
+        let serial = app.task_list.next_serial();
+        press_row(&mut app, serial, "Done", true);
+        let serial = app.task_list.next_serial();
+        release_row(&mut app, serial, "Done");
         assert!(on_disk(&directory, "B").contains("- [x] Order lunch"));
     }
 
@@ -1453,5 +1523,157 @@ mod tests {
         undo_by_notice(&mut app);
         assert_eq!(notice(&app).as_deref(), Some(CHANGED));
         assert_eq!(app.banner, None);
+    }
+
+    fn write_a(directory: &tempfile::TempDir, text: &str) {
+        let path = directory.path().join("workspace/Work/Tasks/A.md");
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The lines of the note `title`'s rows, in the list's order.
+    fn lines_in(app: &App, title: &str) -> Vec<usize> {
+        let note = note(app, title);
+        let listing = &app.task_list.listing;
+        (listing.rows())
+            .map(|row| listing.record(row).unwrap())
+            .filter(|record| record.note == note)
+            .map(|record| record.line)
+            .collect()
+    }
+
+    fn only_open(app: &mut App) {
+        let open = super::super::task_list::CHIPS
+            .iter()
+            .position(|status| *status == StatusType::Open)
+            .unwrap();
+        click(app, Click::Control(Control::Chip(open)));
+    }
+
+    #[test]
+    fn hide_from_a_row_reads_the_note_as_it_is_written() {
+        // The open note, its task gone on disk before any poll saw it.
+        let (directory, mut app) = fixture();
+        right_click(&mut app, "Book the room");
+        let theirs = "# A\n\n- [ ] Mail the deck 📅 2026-12-01\n";
+        write_a(&directory, theirs);
+        batch(&mut app, &[letter("h")]);
+        assert_eq!(on_disk(&directory, "A"), theirs);
+        assert_eq!(notice(&app).as_deref(), Some(CHANGED));
+        assert!(!app.can_undo_task_write());
+        // A note not open: its line changed, and two copies of it below.
+        let (directory, mut app) = fixture();
+        right_click(&mut app, "Order lunch");
+        let theirs = "# B\n\n- [ ] Order dinner\n- [ ] Order lunch\n- [ ] Order lunch\n";
+        write_b(&directory, theirs);
+        refresh(&mut app);
+        batch(&mut app, &[letter("h")]);
+        assert_eq!(on_disk(&directory, "B"), theirs);
+        assert_eq!(notice(&app).as_deref(), Some(CHANGED));
+        // While it is there, it hides.
+        right_click(&mut app, "Order dinner");
+        batch(&mut app, &[letter("h")]);
+        assert!(on_disk(&directory, "B").starts_with("---\ntasks: off\n---\n"));
+    }
+
+    #[test]
+    fn a_hold_never_passes_to_another_task_of_the_same_text() {
+        let b = "# B\n\n- [ ] Order lunch\n- [x] Order lunch ✅ 2026-11-19\n";
+        let (directory, mut app) = fixture_with("advanced", A, b);
+        only_open(&mut app);
+        select(&mut app, "Order lunch");
+        batch(&mut app, &[space()]);
+        assert_eq!(lines_in(&app, "B"), [2]);
+        // The written line is replaced: the done task below it reads as it
+        // did, but was another task all along.
+        let theirs = "# B\n\n- [ ] Something else\n- [x] Order lunch ✅ 2026-11-19\n";
+        write_b(&directory, theirs);
+        refresh(&mut app);
+        assert_eq!(rows_in(&app, "B"), ["Something else"]);
+        assert!(app.task_list.held.is_empty());
+    }
+
+    #[test]
+    fn undo_updates_the_hold_of_the_line_it_undid() {
+        let (_directory, mut app) = fixture_with("advanced", A, "# B\n\n- [ ] Same\n- [ ] Same\n");
+        only_open(&mut app);
+        assert_eq!(lines_in(&app, "B"), [2, 3]);
+        let b = note(&app, "B");
+        let listing = &app.task_list.listing;
+        let rows: Vec<usize> = (listing.rows())
+            .filter(|&row| listing.record(row).unwrap().note == b)
+            .collect();
+        let generation = app.task_list.generation;
+        let (first, second) = (rows[0], rows[1]);
+        click(
+            &mut app,
+            Click::Select {
+                generation,
+                entry: first,
+            },
+        );
+        batch(&mut app, &[space()]);
+        let generation = app.task_list.generation;
+        click(
+            &mut app,
+            Click::Select {
+                generation,
+                entry: second,
+            },
+        );
+        batch(&mut app, &[space()]);
+        assert_eq!(lines_in(&app, "B"), [2, 3]);
+        let undo = undo_key(&app);
+        batch(&mut app, &[undo]);
+        assert_eq!(lines_in(&app, "B"), [2, 3], "each where it stood");
+        assert_eq!(app.task_list.held.len(), 2);
+    }
+
+    #[test]
+    fn a_write_holds_the_rows_of_the_task_it_wrote() {
+        use super::super::task_list::GroupKey;
+        let (directory, mut app) = fixture_with("advanced", A, "# B\n\n- [ ] Order lunch @amy\n");
+        click(&mut app, Click::Control(Control::GroupBy));
+        choose(&mut app, "Owner");
+        let lunch = {
+            let listing = &app.task_list.listing;
+            (listing.rows())
+                .find(|&row| listing.record(row).unwrap().source.contains("Order lunch"))
+                .unwrap()
+        };
+        let generation = app.task_list.generation;
+        click(
+            &mut app,
+            Click::RowMenu {
+                generation,
+                entry: lunch,
+            },
+        );
+        assert_eq!(menu_kind(&app), Some(MenuKind::Task));
+        // Another task takes its line before the menu's choice.
+        write_b(
+            &directory,
+            "# B\n\n- [ ] Call @bob\n- [ ] Order lunch @amy\n",
+        );
+        refresh(&mut app);
+        batch(&mut app, &[letter("p")]);
+        batch(&mut app, &[letter("h")]);
+        assert!(on_disk(&directory, "B").contains("Order lunch @amy ⏫"));
+        let listing = &app.task_list.listing;
+        let groups: Vec<GroupKey> = (listing.rows())
+            .filter_map(|row| {
+                let record = listing.record(row).unwrap();
+                let Entry::Row { group, .. } = listing.entries[row] else {
+                    return None;
+                };
+                record
+                    .source
+                    .contains("Order lunch")
+                    .then(|| listing.groups[group].key.clone())
+            })
+            .collect();
+        assert_eq!(groups, [GroupKey::Owner("amy".into())]);
+        let held = &app.task_list.held;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].line, 3);
     }
 }
