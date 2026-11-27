@@ -667,6 +667,11 @@ impl Session {
     pub fn pending_durability(&self) -> bool {
         self.store.pending_durability()
     }
+    /// Whether a best-effort write's directory (task settings) is still
+    /// unsynced; ticks retry it.
+    pub fn pending_best_effort(&self) -> bool {
+        self.store.pending_best_effort()
+    }
     pub fn fail_next(&mut self, fault: Fault) {
         self.store.fail_next(fault);
     }
@@ -1650,7 +1655,9 @@ impl Session {
         {
             self.flush_active(now, false, events)?;
         }
-        if self.store.pending_durability()
+        // A best-effort sync (task settings) is retried on ticks too; its
+        // failing again is never an error of the retry.
+        if (self.store.pending_durability() || self.store.pending_best_effort())
             && now.saturating_sub(self.last_durability_retry) >= Duration::from_secs(1)
         {
             self.last_durability_retry = now;

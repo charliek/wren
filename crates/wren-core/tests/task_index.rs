@@ -1658,6 +1658,12 @@ fn a_settings_retry_that_cannot_sync_blocks_no_flush_or_switch() {
     let saved = fs::read_to_string(root.path().join(TASKS_FILE)).unwrap();
     assert!(saved.contains("Work/Goals"), "{saved}");
     assert!(!session.pending_durability());
+    // Its sync stays pending, best effort, and an idle tick retries it.
+    assert!(session.pending_best_effort());
+    session
+        .apply_at(Op::Tick, Duration::from_secs(5))
+        .expect("a tick never fails on a best-effort sync");
+    assert!(!session.pending_best_effort());
 
     // The same on leaving the workspace, after another unsaved change.
     session.fail_next(Fault::Write);
