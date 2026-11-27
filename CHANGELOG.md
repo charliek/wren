@@ -35,10 +35,13 @@ version's section as its notes, and publishes to the apt repo. See
   filters. It is created only when something is set, and never with
   `tasks = off`.
 - Settings `tasks-me` (the owners who count as Me) and `task-counts` (the
-  header counts, also **Toggle task counts** in the palette).
+  header counts, also **Toggle task counts** in the palette, ⇧⌘H /
+  Mod+Shift+H).
 
 ### Fixed
 
+- A column's header title ends in "…" when the column is too narrow for it,
+  instead of running under the buttons after it.
 - Fixed some races where a workspace scan that finishes late undid recent
   changes, in search as well as tasks: a failed scan keeps the open and
   just-changed notes, a result that omits a changed note that still exists is

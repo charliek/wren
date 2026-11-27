@@ -316,7 +316,8 @@ does is written into the notes as plain text, as the editor does.
   doing tasks of what the column belongs to: Sections the workspace, Groups
   the section, Notes the group. The number is red while one of them is
   overdue. A click opens the view of that scope, and the count looks
-  pressed while that view shows.
+  pressed while that view shows. In a narrow column the header's title ends
+  in "…" so the count stays whole.
 - **Show tasks** (⇧⌘T on macOS, Mod+Shift+T on Linux, `tasks.show`, or
   **Show tasks** in the palette). It opens the view of where the keyboard
   is: from the Sections column the selected section, from the Groups column
@@ -339,8 +340,9 @@ saved history is what the note visits alone make, and Wren reopens on the
 last note.
 
 The counts follow `task-counts` in [`config.conf`](configuration.md#settings);
-**Toggle task counts** (`view.toggle_task_counts`) in the palette flips it,
-saves it, and shows a message with Undo. If `config.conf` cannot be written
+**Toggle task counts** (⇧⌘H on macOS, Mod+Shift+H on Linux,
+`view.toggle_task_counts`, or in the palette) flips it, saves it, and shows a
+message with Undo. If `config.conf` cannot be written
 the counts still change for this session, and the message says so. The
 setting hides only the counts; the view and Show tasks stay.
 

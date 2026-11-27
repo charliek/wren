@@ -591,11 +591,12 @@ mod tests {
                     !action.starts_with("task.") || matches!(action, "task.set_due" | "task.edit"),
                     "{scheme:?}: {trigger} → {action} (Q13: palette only)"
                 );
-                // Of the entry points only Show tasks has a key (§10,
-                // 2026-11-26).
+                // Of the entry points only Show tasks (§10, 2026-11-26) and
+                // Toggle task counts (§10, 2026-11-27) have keys.
                 let id = CommandId::parse(action).expect("a default names a command");
                 assert!(
-                    !id.task_entry() || id == CommandId::ShowTasks,
+                    !id.task_entry()
+                        || matches!(id, CommandId::ShowTasks | CommandId::ToggleTaskCounts),
                     "{scheme:?}: {trigger} → {action}"
                 );
             }

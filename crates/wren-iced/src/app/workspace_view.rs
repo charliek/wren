@@ -330,11 +330,12 @@ impl App {
         let colors = self.definition.colors;
         let active = self.column == column;
         // The active column's header turns accent with a leading dot, so the
-        // keyboard's place reads at a glance.
-        let title = chrome::label(
+        // keyboard's place reads at a glance. In a narrow column the title
+        // ends in "…" so the count and the + after it stay whole.
+        let title = ellipsis(
             label.to_uppercase(),
-            11,
-            if active { colors.accent } else { colors.muted },
+            11.0,
+            theme::color(if active { colors.accent } else { colors.muted }),
         )
         .font(fonts::SEMIBOLD);
         let title: Element<'a, Message> = if active {
@@ -348,7 +349,7 @@ impl App {
                 .width(Fill)
                 .into()
         } else {
-            title.width(Fill).into()
+            title.into()
         };
         // With tasks on, the count of what the column belongs to sits
         // before the +.

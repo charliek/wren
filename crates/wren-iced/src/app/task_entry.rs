@@ -21,7 +21,7 @@
 //! With tasks off none of it exists: no count, mark, command, key or row.
 
 use iced::widget::{button, container, row, tooltip};
-use iced::Element;
+use iced::{Element, Fill};
 use wren_core::fs_store::RelPath;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent};
 use wren_core::ops::Op;
@@ -155,8 +155,11 @@ impl App {
         };
         let face = row![
             chrome::icon(Icon::Tasks, 13.0, ink),
+            // The column title's line, as the ellipsis widget rounds it, so
+            // the number sits on the title's line to the pixel.
             chrome::label(count.counts.open_and_doing.to_string(), 11, number)
-                .font(fonts::SEMIBOLD),
+                .font(fonts::SEMIBOLD)
+                .line_height(iced::Pixels((11.0f32 * 1.3).round())),
         ]
         .spacing(4)
         .align_y(iced::Center);
@@ -164,7 +167,9 @@ impl App {
             Some(key) => format!("Tasks in {} ({key})", self.task_view_label(&count.scope)),
             None => format!("Tasks in {}", self.task_view_label(&count.scope)),
         };
-        let pressable = button(face)
+        // A button puts its content at its top, so the face is centred in
+        // the chip's height here, on the title's line.
+        let pressable = button(container(face).center_y(Fill))
             .height(22)
             .padding([0, 6])
             .on_press(Message::Command(Command::ShowTasks(count.scope)))
@@ -1208,15 +1213,25 @@ mod tests {
                 keymap.accel("tasks.show"),
                 scheme.parse("mod+shift+t").as_ref()
             );
-            for key in [
-                "note.hide_tasks",
-                "group.hide_tasks",
-                "view.toggle_task_counts",
-            ] {
+            assert_eq!(
+                keymap.accel("view.toggle_task_counts"),
+                scheme.parse("mod+shift+h").as_ref()
+            );
+            for key in ["note.hide_tasks", "group.hide_tasks"] {
                 assert_eq!(keymap.accel(key), None, "{scheme:?} {key}");
+            }
+            // Neither key is a chord a text field or the editor takes as
+            // Copy, Cut, Paste or Select all, Shift held or not.
+            for key in ["tasks.show", "view.toggle_task_counts"] {
+                let accel = keymap.accel(key).expect("a default key");
+                assert!(
+                    !crate::field_keys::native_chords(scheme.platform).any(|chord| chord == *accel),
+                    "{scheme:?} {key}"
+                );
             }
             let (off, _) = super::super::preferences::build_keymap(scheme, &[], false);
             assert_eq!(off.accel("tasks.show"), None);
+            assert_eq!(off.accel("view.toggle_task_counts"), None);
         }
     }
 

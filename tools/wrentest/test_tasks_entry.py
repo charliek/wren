@@ -7,7 +7,8 @@ carry a mark, the scope ``tasks.show`` would open, and the message with
 Undo; it clicks a count, the message's Undo, or the message. The rest goes
 through the paths a user takes: ``tasks.show`` by its ``mod`` chord in the
 editor and on a board, by the shortcut path from each column, and from the
-palette; a row's actions from the item-actions palette a right-click
+palette; ``view.toggle_task_counts`` by its ``mod`` chord in the editor and
+on a board; a row's actions from the item-actions palette a right-click
 opens; ``view.toggle_task_counts`` from the palette.
 
 Every case writes its own ``tasks`` line and the advanced engine, whatever
@@ -184,6 +185,44 @@ def test_counts_hide_and_show_from_the_palette_with_undo(tmp_path: Path) -> None
             entry(app, click="notes")
 
 
+def test_counts_hide_and_show_by_their_chord_in_the_editor_and_on_a_board(
+        tmp_path: Path) -> None:
+    """Mod+Shift+H (discovery/tasks-build.md §10, 2026-11-27) runs Toggle
+    task counts: from the editor, which it types nothing into, and from a
+    board, which it leaves as it was. The palette shows the key."""
+    with entry_app(tmp_path, "chord") as app:
+        call = app.client.call
+        rows = palette(app, "commands", "task counts")["results"]
+        row = next(row for row in rows if row["key"] == {"command": "view.toggle_task_counts"})
+        assert row["shortcut"].endswith("+Shift+H") or row["shortcut"] == "⇧⌘H", row
+        gateway(app, "palette.close")
+        call("editor.focus")
+        text = call("editor.get")["text"]
+        call("editor.key", {"key": "h", "mods": ["mod", "shift"]})
+        state = entry(app)
+        assert state["counts"] is False
+        assert state["headers"] == {"sections": None, "groups": None, "notes": None}
+        assert state["notice"]["text"] == (
+            "Task counts hidden · saved task-counts = off to config.conf")
+        assert call("editor.get")["text"] == text
+        assert app.settings_path.read_text(encoding="utf-8").endswith("task-counts = off\n")
+        # On a board the chord shows them again, and the board is untouched.
+        open_note(app, FLOW)
+        call("editor.focus")
+        wait_for(lambda: call("focus.get")["named"] == ["note-editor"],
+                 description="the board has the keyboard")
+        def board_state() -> tuple:
+            board = call("board.get")
+            return tuple(board[key] for key in ("revision", "pristine", "selection", "tool",
+                                                "can_undo"))
+        before = board_state()
+        call("board.key", {"key": "h", "mods": ["mod", "shift"]})
+        assert entry(app)["counts"] is True
+        assert board_state() == before
+        assert app.settings_path.read_text(encoding="utf-8").endswith("task-counts = on\n")
+        assert (tmp_path / "workspace" / FLOW).read_text(encoding="utf-8") == FILES[FLOW]
+
+
 def test_show_tasks_opens_where_the_keyboard_is(tmp_path: Path) -> None:
     with entry_app(tmp_path, "show") as app:
         call = app.client.call
@@ -349,8 +388,10 @@ def test_with_tasks_off_there_is_no_way_in(tmp_path: Path) -> None:
         call("editor.focus")
         text = call("editor.get")["text"]
         call("editor.key", {"key": "t", "mods": ["mod", "shift"]})
+        call("editor.key", {"key": "h", "mods": ["mod", "shift"]})
         assert call("editor.get")["text"] == text
         assert view(app) == {"tasks": False}
+        assert entry(app) == {"tasks": False}
         menus = call("menu.get")["menus"]
         assert not [entry for menu in menus for entry in menu["items"]
                     if entry.get("key") in ("tasks.show", "view.toggle_task_counts")]
@@ -381,4 +422,11 @@ def test_native_show_tasks_chord_opens_the_notes_group(tmp_path: Path) -> None:
         native.keys(window, native_mod("shift+t"))
         wait_for(lambda: view(app)["open"], description="Mod+Shift+T from Sections")
         assert shown_scope(app) == ("section", "Work")
+        assert call("editor.get")["text"] == text
+        # Mod+Shift+H hides the counts and shows them again.
+        native.keys(window, native_mod("shift+h"))
+        wait_for(lambda: entry(app)["counts"] is False, description="Mod+Shift+H hides the counts")
+        native.settle_focus()
+        native.keys(window, native_mod("shift+h"))
+        wait_for(lambda: entry(app)["counts"] is True, description="Mod+Shift+H shows them")
         assert call("editor.get")["text"] == text
