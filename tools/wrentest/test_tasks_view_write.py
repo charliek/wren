@@ -272,3 +272,124 @@ def test_native_a_click_on_the_box_and_a_right_click_with_its_key(tmp_path: Path
         native.keys(window, native_mod("z"))
         wait_for(lambda: disk(root, B) == B_TEXT.replace(LUNCH, "- [/] Order lunch"),
                  timeout=5, description="the undo chord undoes the write")
+
+
+def describe(app: WrenApp) -> dict | None:
+    return state(app)["describe"]
+
+
+def test_the_description_edited_in_place(tmp_path: Path) -> None:
+    with view_app(tmp_path, "describe") as (app, root):
+        call = app.client.call
+        lunch = select(app, "Order lunch")
+        # F2: the description as written, in a field over the row.
+        listing = press(app, "f2")
+        assert listing["describe"]["row"] == lunch, listing["describe"]
+        assert listing["describe"]["text"] == "Order lunch"
+        # Tab keeps the keyboard in the field; typed keys are the field's.
+        for key in ("tab", "space", "t", "e", "a"):
+            press(app, key)
+        assert describe(app)["text"] == "Order lunch tea"
+        listing = press(app, "enter")
+        assert listing["describe"] is None
+        assert disk(root, B) == B_TEXT.replace("Order lunch", "Order lunch tea")
+        shown = notice(app)
+        assert shown["text"] == f"Description changed · wrote line 3 of {B}"
+        assert shown["undo"] is True
+        call("tasks.entry", {"undo": True})
+        assert disk(root, B) == B_TEXT
+        # The undo chord in the field undoes no task write.
+        press(app, "space")
+        assert "[x]" in disk(root, B)
+        press(app, "f2")
+        press(app, "z", "mod")
+        assert describe(app) is not None
+        assert "[x]" in disk(root, B)
+        press(app, "escape")
+        assert describe(app) is None
+        press(app, "z", "mod")
+        assert disk(root, B) == B_TEXT
+        # A double-click on the open note's row: Escape writes nothing, and
+        # the list keeps the keyboard.
+        room = row_of(state(app), "Book the room")
+        listing = click(app, describe=room)
+        assert listing["describe"]["text"] == "Book the room"
+        assert listing["rows"][room]["selected"]
+        call("tasks.view", {"type": "Book the big room"})
+        listing = press(app, "escape")
+        assert listing["describe"] is None
+        assert call("tasks.view")["keys"] is True
+        assert draft(app) == A_TEXT
+        # An empty description is refused and the field stays.
+        click(app, describe=room)
+        call("tasks.view", {"type": "  "})
+        press(app, "enter")
+        assert message(app) == "A task needs a description; nothing was written"
+        assert describe(app) is not None
+        call("tasks.view", {"type": "Book the big room"})
+        press(app, "enter")
+        assert draft(app) == A_TEXT.replace("Book the room", "Book the big room")
+        assert message(app) == f"Description changed · wrote line 4 of {A}"
+        # A click elsewhere ends the edit, writing nothing.
+        click(app, describe=row_of(state(app), "Order lunch"))
+        call("tasks.view", {"type": "Order cake"})
+        listing = click(app, control="chip:open")
+        assert listing["describe"] is None
+        assert disk(root, B) == B_TEXT
+
+
+def test_a_stale_description_edit_is_refused(tmp_path: Path) -> None:
+    with view_app(tmp_path, "describe-stale") as (app, root):
+        select(app, "Order lunch")
+        press(app, "f2")
+        theirs = B_TEXT.replace("Order lunch", "Order dinner")
+        (root / B).write_text(theirs, encoding="utf-8")
+        app.client.call("tasks.view", {"type": "Order tea"})
+        press(app, "enter")
+        assert disk(root, B) == theirs
+        assert message(app) == CHANGED
+        wait_for(lambda: "Order dinner" in descriptions(state(app)), timeout=5,
+                 description="the list shows the note as it is")
+
+
+@pytest.mark.native_x11
+def test_native_typing_in_the_description_field(tmp_path: Path) -> None:
+    with view_app(tmp_path, "describe-native", focused=True) as (app, root):
+        windows = xdo("search", "--onlyvisible", "--pid", str(app.pid)).splitlines()
+        assert len(windows) == 1, windows
+        window = windows[0]
+
+        def drawn(description: str) -> dict:
+            def found():
+                rows = state(app)["rows"]
+                return rows[row_of({"rows": rows}, description)]["cells"]["description"]
+            return wait_for(found, timeout=5, description=f"the description of {description}")
+
+        # F2 on the selected row, then typing, Enter: the closed note.
+        select(app, "Order lunch")
+        native.keys(window, "F2")
+        wait_for(lambda: describe(app), timeout=5, description="F2 opens the field")
+        native.settle_focus()
+        native.type_text(window, " now")
+        wait_for(lambda: (describe(app) or {}).get("text") == "Order lunch now", timeout=5,
+                 description="typing reaches the field")
+        native.keys(window, "Return")
+        wait_for(lambda: disk(root, B) == B_TEXT.replace("Order lunch", "Order lunch now"),
+                 timeout=5, description="Enter writes the description")
+        assert describe(app) is None
+        # A double-click on a description opens it there; Escape writes
+        # nothing, and the list has the keyboard again: Space toggles.
+        native.move(window, native.point_in(drawn("Book the room")))
+        xdo("click", "--repeat", "2", "--delay", "60", "1")
+        wait_for(lambda: (describe(app) or {}).get("text") == "Book the room", timeout=5,
+                 description="a double-click opens the field")
+        native.settle_focus()
+        native.type_text(window, "xyz")
+        wait_for(lambda: (describe(app) or {}).get("text") == "Book the roomxyz", timeout=5,
+                 description="typing reaches the field")
+        native.keys(window, "Escape")
+        wait_for(lambda: describe(app) is None, timeout=5, description="Escape closes it")
+        assert draft(app) == A_TEXT
+        native.keys(window, "space")
+        wait_for(lambda: "- [x] Book the room" in draft(app), timeout=5,
+                 description="the list has the keyboard again")

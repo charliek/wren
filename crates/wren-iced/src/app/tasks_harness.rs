@@ -61,6 +61,14 @@
 //! over the view and releases it, as a pointer does. With `{"list": true}` each row says whether it is
 //! `held` where a write left it, and where it and its cells were drawn
 //! (`bounds`, `cells`).
+//!
+//! A description edited in place (item 10.5): `{"key": {"key": "f2"}}` on
+//! the selected row, or `{"click": {"describe": n}}`, a double-click on the
+//! nth row's description, opens its field. While it is open `{"key": …}`
+//! presses a key in the field, as iced's text input takes it at the end of
+//! its text, and `{"type": text}` sets the field's text as a paste or an
+//! input method's commit does. The list's `describe` is the field's `row`,
+//! `text` and where it was drawn (`bounds`), or `null`.
 
 use std::sync::Arc;
 
@@ -100,8 +108,10 @@ impl App {
                 let press = request.params.get("key");
                 let open = request.params.get("open");
                 let click = request.params.get("click");
+                let typed = request.params.get("type");
                 let list = request.params.get("list").and_then(Value::as_bool) == Some(true);
-                if (press.is_some() || open.is_some() || click.is_some()) && !self.preferences.tasks
+                if (press.is_some() || open.is_some() || click.is_some() || typed.is_some())
+                    && !self.preferences.tasks
                 {
                     return Err("Tasks are off".into());
                 }
@@ -129,6 +139,13 @@ impl App {
                     let scheme = self.preferences.keymap.scheme();
                     let (key, modifiers) = super::test_requests::key_press(press, scheme)?;
                     let task = self.task_view_press(key, modifiers);
+                    let task = synced(self, task);
+                    request.respond(Ok(answer(self)));
+                    return Ok(task);
+                }
+                if let Some(typed) = typed {
+                    let text = typed.as_str().ok_or("type must be a string")?.to_owned();
+                    let task = self.describe_typed(text)?;
                     let task = synced(self, task);
                     request.respond(Ok(answer(self)));
                     return Ok(task);
@@ -613,6 +630,9 @@ impl App {
         key: iced::keyboard::Key,
         modifiers: iced::keyboard::Modifiers,
     ) -> Task<Message> {
+        if self.task_list.describe.is_some() {
+            return self.describe_press(key, modifiers);
+        }
         let text = match &key {
             iced::keyboard::Key::Character(c) => Some(c.to_string()),
             iced::keyboard::Key::Named(iced::keyboard::key::Named::Space) => Some(" ".into()),
@@ -655,6 +675,111 @@ impl App {
             None => Task::none(),
         };
         Task::batch([listed, copy])
+    }
+
+    /// A key pressed in the field of a description edited in place, as one
+    /// batch of its own: the field reports it (a shortcut, Enter, Escape)
+    /// or the text input types it at the end of its text, and the app's
+    /// key handling then reads its copy, as a real press is.
+    fn describe_press(
+        &mut self,
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Message> {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+        let Some(describe) = &self.task_list.describe else {
+            return Task::none();
+        };
+        let (instance, typed, composing) =
+            (describe.instance, describe.text.clone(), describe.composing);
+        let serial = self.task_list.next_serial();
+        let send = |app: &mut Self, event| {
+            app.update(Message::TaskView(super::tasks_view::Event::Field {
+                serial,
+                instance,
+                event,
+            }))
+        };
+        let physical = iced::keyboard::key::Physical::Unidentified(
+            iced::keyboard::key::NativeCode::Unidentified,
+        );
+        let mut tasks = Vec::new();
+        if let Some(accel) = crate::keys::shortcut(&key, physical, modifiers) {
+            tasks.push(send(
+                self,
+                crate::line_field::LineEvent::Shortcut {
+                    accel,
+                    closed: false,
+                },
+            ));
+        }
+        let plain = !(modifiers.control() || modifiers.alt() || modifiers.logo());
+        let captured = match crate::line_field::route(&key, modifiers, composing) {
+            Some(taken) => {
+                if let Some(event) = taken {
+                    tasks.push(send(self, event));
+                }
+                true
+            }
+            None => {
+                let text = match key.as_ref() {
+                    Key::Character(character) if plain => Some(format!("{typed}{character}")),
+                    Key::Named(Named::Space) if plain => Some(format!("{typed} ")),
+                    Key::Named(Named::Backspace) => {
+                        let mut text = typed.clone();
+                        text.pop();
+                        Some(text)
+                    }
+                    _ => None,
+                };
+                match text {
+                    Some(text) => {
+                        if text != typed {
+                            tasks.push(send(self, crate::line_field::LineEvent::Typed(text)));
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        let status = if captured {
+            iced::event::Status::Captured
+        } else {
+            iced::event::Status::Ignored
+        };
+        let event = iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: physical,
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+        if let Some(input) =
+            crate::keys::input(&event).filter(|input| crate::keys::reaches_app(input, status))
+        {
+            tasks.push(self.update(Message::Key(crate::keys::with_status(input, status))));
+        }
+        Task::batch(tasks)
+    }
+
+    /// The field of a description edited in place now holds `text`, as a
+    /// paste or an input method's commit leaves it.
+    fn describe_typed(&mut self, text: String) -> Result<Task<Message>, String> {
+        let instance = (self.task_list.describe.as_ref())
+            .ok_or("No description is being edited")?
+            .instance;
+        let serial = self.task_list.next_serial();
+        Ok(
+            self.update(Message::TaskView(super::tasks_view::Event::Field {
+                serial,
+                instance,
+                event: crate::line_field::LineEvent::Typed(text),
+            })),
+        )
     }
 
     /// A click in the task view: on a control (`{"control": name}`), on a
@@ -711,6 +836,20 @@ impl App {
                 generation: self.task_list.generation,
                 entry,
             }
+        } else if let Some(entry) = row("describe")? {
+            // The second press of a double-click: its row selected, then
+            // the edit, in one batch.
+            let generation = self.task_list.generation;
+            let serial = self.task_list.next_serial();
+            let select = self.update(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Select { generation, entry },
+            }));
+            let describe = self.update(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Describe { generation, entry },
+            }));
+            return Ok(Task::batch([select, describe]));
         } else if let Some(entry) = row("right")? {
             Click::RowMenu {
                 generation: self.task_list.generation,
@@ -728,7 +867,12 @@ impl App {
                 Some("box") => Cell::Box,
                 Some("priority") => Cell::Priority,
                 Some("due") => Cell::Due,
-                other => return Err(format!("no cell {other:?}: box, priority or due")),
+                Some("description") => Cell::Description,
+                other => {
+                    return Err(format!(
+                        "no cell {other:?}: box, priority, due or description"
+                    ))
+                }
             };
             Click::Cell {
                 generation: self.task_list.generation,
@@ -755,7 +899,9 @@ impl App {
                 instance: menu.instance(),
             })
         } else {
-            return Err("click needs control, row, source, right, cell, menu or outside".into());
+            return Err(
+                "click needs control, row, source, describe, right, cell, menu or outside".into(),
+            );
         };
         let serial = self.task_list.next_serial();
         // A row of the menu is chosen as a pointer chooses it: a press on
@@ -835,6 +981,7 @@ impl App {
                         "box": list.drawn(Control::Cell(entry, Cell::Box)).map(rectangle),
                         "priority": list.drawn(Control::Cell(entry, Cell::Priority)).map(rectangle),
                         "due": list.drawn(Control::Cell(entry, Cell::Due)).map(rectangle),
+                        "description": list.drawn(Control::Cell(entry, Cell::Description)).map(rectangle),
                     },
                     "held": list.held.iter().any(|hold| hold.holds(record)),
                 })
@@ -918,6 +1065,17 @@ impl App {
             }),
             "focus": list.focus.map_or_else(|| "list".to_owned(), Control::name),
             "menu": menu,
+            "describe": list.describe.as_ref().map(|describe| {
+                let entry = describe.entry_in(listing);
+                json!({
+                    "row": entry.and_then(|entry| listing.rows().position(|row| row == entry)),
+                    "text": describe.text,
+                    "composing": describe.composing,
+                    "bounds": entry
+                        .and_then(|entry| list.drawn(Control::Cell(entry, Cell::Description)))
+                        .map(rectangle),
+                })
+            }),
             "bounds": bounds,
             "scroll": list.scroll,
         })

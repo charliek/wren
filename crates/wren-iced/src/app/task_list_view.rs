@@ -67,7 +67,7 @@ pub(super) const LIST: &str = "task-list";
 const UNDRAWN_HEIGHT: f32 = 2000.0;
 /// What the footer says the list's keys are.
 pub(super) const HINT: &str =
-    "Space toggle \u{b7} S D P \u{b7} E edit \u{b7} \u{21b5} open \u{b7} R refresh";
+    "Space toggle \u{b7} S D P \u{b7} E edit \u{b7} F2 rename \u{b7} \u{21b5} open \u{b7} R refresh";
 
 /// A control of the view, by what it does: what Tab walks, what a menu
 /// hangs under, and where the harness clicks.
@@ -100,6 +100,8 @@ pub enum Cell {
     Priority,
     /// The due date: a click opens the calendar.
     Due,
+    /// The description: a double-click edits it in place.
+    Description,
 }
 
 impl Cell {
@@ -109,6 +111,7 @@ impl Cell {
             Self::Box => "box",
             Self::Priority => "priority",
             Self::Due => "due",
+            Self::Description => "description",
         }
     }
 }
@@ -207,6 +210,12 @@ pub enum Click {
         generation: u64,
         entry: usize,
     },
+    /// A double-click on a row's description: edit it in place. It comes
+    /// in the batch of its second press, after that press's `Select`.
+    Describe {
+        generation: u64,
+        entry: usize,
+    },
     Control(Control),
     Menu(host_menu::Event),
 }
@@ -270,7 +279,7 @@ pub(super) struct ListState {
     batch: u64,
     /// Something in that batch opened, closed or was pressed: the rest of
     /// it is dropped.
-    stopped: bool,
+    pub stopped: bool,
     /// A key reached the menu over the view in that batch: no press after
     /// it there chooses a row (discovery/tasks.md §6.2).
     menu_keyed: bool,
@@ -278,7 +287,7 @@ pub(super) struct ListState {
     armed: Option<(u64, u32)>,
     /// The app's copies still to come of the batch's Escapes and
     /// shortcuts, in order, each with whether it is dropped.
-    copies: std::collections::VecDeque<(AppCopy, bool)>,
+    pub copies: std::collections::VecDeque<(AppCopy, bool)>,
     /// Moves each time the listing is built: what a row click names.
     pub generation: u64,
     /// The titles of the workspace's notes, read when the listing is built.
@@ -290,6 +299,13 @@ pub(super) struct ListState {
     /// The rows written since the list was last refreshed, held where they
     /// stood.
     pub held: Vec<task_list::Hold>,
+    /// The row whose description is being edited in place, and its field.
+    pub describe: Option<super::task_describe::Describe>,
+    /// The number of the last description field opened.
+    pub describes: u64,
+    /// The row a click of this batch selected: the second press of a
+    /// double-click on its description goes on to edit it.
+    selected_in_batch: Option<(u64, usize)>,
 }
 
 impl ListState {
@@ -300,6 +316,7 @@ impl ListState {
         *self = Self {
             serials: std::cell::Cell::new(self.serials.get()),
             menus: self.menus,
+            describes: self.describes,
             generation: self.generation + 1,
             ..Self::default()
         };
@@ -453,10 +470,18 @@ impl App {
             self.task_list.menu = None;
             self.task_list.focus = None;
             self.task_list.held.clear();
+            self.task_list.describe = None;
             return Task::none();
         };
         if self.task_list.menu.is_some() && !self.task_view_has_keys() {
             self.task_list.menu = None;
+        }
+        // An edit in place lasts only while its field can have the keyboard.
+        if !self.task_view_has_keys()
+            || self.task_list.menu.is_some()
+            || self.task_list.focus.is_some()
+        {
+            self.task_list.describe = None;
         }
         let Some(session) = &self.session else {
             return Task::none();
@@ -534,6 +559,13 @@ impl App {
             list.scroll = 0.0;
             list.focus = None;
             list.menu = None;
+            list.describe = None;
+        }
+        // An edit whose row the list no longer shows has nothing to show it in.
+        if (list.describe.as_ref())
+            .is_some_and(|describe| describe.entry_in(&list.listing).is_none())
+        {
+            list.describe = None;
         }
         let previous = list.selected.take();
         let entry = previous
@@ -581,7 +613,7 @@ impl App {
     }
 
     /// Select the entry `entry` and scroll it into view.
-    fn select_entry(&mut self, entry: usize) -> Task<Message> {
+    pub(super) fn select_entry(&mut self, entry: usize) -> Task<Message> {
         let Some(selected) = (self.task_list.listing.record(entry).is_some())
             .then(|| select(&self.task_list.listing, entry))
         else {
@@ -679,13 +711,14 @@ impl App {
     }
 
     /// Read input of the batch `serial`: a new batch starts afresh.
-    fn enter_batch(&mut self, serial: u64) {
+    pub(super) fn enter_batch(&mut self, serial: u64) {
         let list = &mut self.task_list;
         if serial != list.batch {
             list.batch = serial;
             list.stopped = false;
             list.menu_keyed = false;
             list.copies.clear();
+            list.selected_in_batch = None;
         }
     }
 
@@ -726,6 +759,18 @@ impl App {
                     self.unfocus_task_control();
                 }
                 Task::none()
+            }
+            // F2 edits the selected row's description in place: the view's
+            // own key, whatever the keymap gives it elsewhere.
+            Some(AppCopy::Shortcut(accel)) if super::task_describe::is_describe_key(&accel) => {
+                self.task_list
+                    .copies
+                    .push_back((AppCopy::Shortcut(accel), true));
+                let (task, stops) = self.describe_key();
+                if stops {
+                    self.task_list.stopped = true;
+                }
+                task
             }
             // The view's own chords (toggle and undo) act here, in their
             // place in the batch, and their copy is spent; any other
@@ -898,6 +943,7 @@ impl App {
         if filters != before {
             // The rows held move to where the new filters put them.
             self.task_list.held.clear();
+            self.task_list.describe = None;
             let _ = self.process_core(Op::SetTaskFilters {
                 scope: item,
                 filters,
@@ -1065,6 +1111,7 @@ impl App {
         anchor: Rectangle,
         selected: Option<u32>,
     ) -> Task<Message> {
+        self.task_list.describe = None;
         self.task_list.menus += 1;
         let mut menu = HostMenu::new(self.task_list.menus, purpose, title, rows, anchor);
         if let Some(id) = selected {
@@ -1227,6 +1274,14 @@ impl App {
         if let Event::Key(key) = event {
             return self.task_list_key(key);
         }
+        if let Event::Field {
+            serial,
+            instance,
+            event,
+        } = event
+        {
+            return self.describe_event(serial, instance, event);
+        }
         if let Event::Click {
             click: Click::Menu(host_menu::Event::Scrolled { instance, y }),
             ..
@@ -1253,6 +1308,14 @@ impl App {
             Event::Scrolled { y, height } => {
                 self.task_list.scroll = y;
                 self.task_list.height = Some(height);
+                // An edit whose row is scrolled out of the rows built would
+                // have no field.
+                if (self.task_list.describe.as_ref())
+                    .and_then(|describe| describe.entry_in(&self.task_list.listing))
+                    .is_some_and(|entry| !self.built_rows().contains(&entry))
+                {
+                    self.task_list.describe = None;
+                }
                 Task::none()
             }
             // A row of the menu released on: chosen only when its press was
@@ -1275,7 +1338,8 @@ impl App {
             Event::Click { click, .. } => {
                 // A press ends what its batch may still do; one after
                 // something opened in the batch, or after another press, is
-                // dropped.
+                // dropped, but for the second press of a double-click on a
+                // description, which selects its row and then edits it.
                 let first = !std::mem::replace(&mut self.task_list.stopped, true);
                 // A press over the menu's card may choose the row it is on
                 // at its release: only the batch's first press, of the
@@ -1295,12 +1359,14 @@ impl App {
                         .map(|row| (instance, row));
                     return Task::none();
                 }
-                if !first {
+                let second = matches!(click, Click::Describe { generation, entry }
+                    if self.task_list.selected_in_batch == Some((generation, entry)));
+                if !first && !second {
                     return Task::none();
                 }
                 self.task_list_click(click)
             }
-            Event::Key(_) => Task::none(),
+            Event::Key(_) | Event::Field { .. } => Task::none(),
         }
     }
 
@@ -1309,11 +1375,15 @@ impl App {
         let current = |app: &Self, generation: u64, entry: usize| {
             generation == app.task_list.generation && app.task_list.listing.record(entry).is_some()
         };
+        // A click anywhere in the view ends an edit in place, writing
+        // nothing, before it does what it does.
+        self.task_list.describe = None;
         match click {
             Click::Select { generation, entry } => {
                 if !current(self, generation, entry) {
                     return Task::none();
                 }
+                self.task_list.selected_in_batch = Some((generation, entry));
                 self.column = Column::Editor;
                 self.task_list.focus = None;
                 let task = self.select_entry(entry);
@@ -1345,6 +1415,14 @@ impl App {
                     return Task::batch([selected, acted]);
                 }
                 Task::batch([selected, acted, self.column_focus()])
+            }
+            Click::Describe { generation, entry } => {
+                if !current(self, generation, entry) {
+                    return Task::none();
+                }
+                self.column = Column::Editor;
+                self.task_list.focus = None;
+                self.open_describe(entry)
             }
             Click::RowMenu { generation, entry } => {
                 if !current(self, generation, entry) {
@@ -1579,19 +1657,28 @@ impl App {
                 .style(move |_| chrome::surface(definition, colors.editor, 0.0, false)),
         )
         .on_press(Message::TaskView(Event::Press));
-        list_keys(content, has_keys, serial, |key| {
-            Message::TaskView(Event::Key(key))
-        })
+        // A description edited in place has the keys in its field.
+        list_keys(
+            content,
+            has_keys && list.describe.is_none(),
+            serial,
+            |key| Message::TaskView(Event::Key(key)),
+        )
         .into()
+    }
+
+    /// The entries whose rows are built: those in view, and a screen's
+    /// worth on each side, so a scroll shows built rows.
+    pub(super) fn built_rows(&self) -> std::ops::Range<usize> {
+        let height = self.list_height();
+        (self.task_list.listing).visible((self.task_list.scroll - height).max(0.0), 3.0 * height)
     }
 
     /// The rows in view, between spaces for those out of it.
     fn list_rows(&self, filters: &TaskFilters) -> Element<'_, Message> {
         let list = &self.task_list;
         let listing = &list.listing;
-        // A screen's worth on each side, so a scroll shows built rows.
-        let height = self.list_height();
-        let visible = listing.visible((list.scroll - height).max(0.0), 3.0 * height);
+        let visible = self.built_rows();
         // Only the rows built are drawn: forget where the others were.
         (list.drawn.borrow_mut()).retain(|(control, _)| match control {
             Control::Source(entry) | Control::Row(entry) | Control::Cell(entry, _) => {
@@ -1691,6 +1778,27 @@ impl App {
         let source = source_text(record, self.note_title(record.note), by_note);
         let serial = self.task_list.serials.get();
         let generation = self.task_list.generation;
+        // The description, or the field that edits it in place; a
+        // double-click on the description opens that.
+        let description: Element<'a, Message> =
+            match (self.task_list.describe.as_ref()).filter(|describe| describe.is_of(record)) {
+                Some(describe) => self.describe_field(describe, serial),
+                None => mouse_area(container(description).clip(true).width(Fill))
+                    .on_press(Message::TaskView(Event::Click {
+                        serial,
+                        click: Click::Select { generation, entry },
+                    }))
+                    .on_double_click(Message::TaskView(Event::Click {
+                        serial,
+                        click: Click::Describe { generation, entry },
+                    }))
+                    .into(),
+            };
+        let description = probe(
+            description,
+            &self.task_list.drawn,
+            Control::Cell(entry, Cell::Description),
+        );
         let source = mouse_area(ellipsis(source, 11.5, theme::color(colors.faint)).width(Shrink))
             .on_press(Message::TaskView(Event::Click {
                 serial,
@@ -1736,9 +1844,7 @@ impl App {
                     .into(),
                 Cell::Box
             ),
-            column![container(description).clip(true).width(Fill), source]
-                .spacing(2)
-                .width(Fill),
+            column![description, source].spacing(2).width(Fill),
             cell(
                 container(chrome::label(priority, 13, colors.text))
                     .center_x(30)

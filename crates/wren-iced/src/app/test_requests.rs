@@ -1116,6 +1116,7 @@ pub(super) fn key_press(
         "alt" => Some(Named::Alt),
         "super" => Some(Named::Super),
         "caps_lock" => Some(Named::CapsLock),
+        "f2" => Some(Named::F2),
         _ => None,
     };
     let key = match named {

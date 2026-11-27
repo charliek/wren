@@ -37,7 +37,9 @@ status chip, grouped by due date and by owner, an empty list with its hint,
 and the scope menu open; then a row's writes (item 10.4): its status,
 priority and task menus, the calendar and the form over it, the message
 with Undo after a write, and a row held in place under the Open chip after
-it was marked done; the PNGs go where `--only tasks` writes them.
+it was marked done, and a row's description edited in place (item 10.5),
+its field open with text typed; the PNGs go where `--only tasks` writes
+them.
 `--only boards` opens the board sample workspace
 (`tools/wrentest/fixtures/boards/`) with `boards = on` and shoots the board
 scenes, writing the exports `board-flow.svg` and `board-flow-export.png` beside
@@ -569,6 +571,15 @@ def task_write_scenes(client, shot_here) -> None:
     client.call("tasks.entry", {"undo": True})
     press("r")
     view(click={"control": "chip:open"})
+    # The description edited in place: F2 on the row, text typed.
+    state = view()
+    row = next(index for index, each in enumerate(state["rows"]) if each["status"] == "open")
+    view(click={"row": row})
+    assert press("f2")["describe"]["row"] == row
+    text = view()["describe"]["text"]
+    view(type=f"{text} before lunch")
+    shot_here("task-row-describe")
+    assert press("escape")["describe"] is None
 
 
 def suggestion_scenes(client, shot_here) -> None:

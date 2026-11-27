@@ -481,6 +481,14 @@ pub enum Event {
         serial: u64,
         click: super::task_list_view::Click,
     },
+    /// What the field of a row's description edit reported, from the field
+    /// numbered `instance`, in the batch of the view whose serial it carries
+    /// (`task_describe.rs`).
+    Field {
+        serial: u64,
+        instance: u64,
+        event: crate::line_field::LineEvent,
+    },
 }
 
 impl App {
@@ -667,6 +675,10 @@ impl App {
     /// takes keys (item 10.3), that is taking it from every widget, so
     /// keys reach the app's own handling and [`App::task_view_key`].
     pub(super) fn task_view_focus(&self) -> Task<Message> {
+        // A row's description edited in place keeps it in its field.
+        if self.task_list.describe.is_some() {
+            return iced::widget::operation::focus(super::task_describe::FIELD);
+        }
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus())
     }
 

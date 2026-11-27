@@ -34,6 +34,7 @@ mod palette;
 mod preferences;
 mod spelling;
 mod task_commands;
+mod task_describe;
 mod task_entry;
 mod task_footer;
 mod task_form;
@@ -845,8 +846,12 @@ impl App {
                 if self.task_form.is_some() {
                     return self.escape_task_form();
                 }
-                // Then the menu over the task view, and a control of the
-                // view's, which gives the keyboard back to its list.
+                // Then a row's description edited in place, the menu over
+                // the task view, and a control of the view's, each of which
+                // gives the keyboard back to its list.
+                if self.cancel_describe() {
+                    return self.task_view_focus();
+                }
                 if self.close_task_menu() || self.unfocus_task_control() {
                     return Task::none();
                 }

@@ -11,6 +11,7 @@ mod fonts;
 mod form_keys;
 mod keys;
 mod layers;
+mod line_field;
 mod list_keys;
 #[cfg(target_os = "macos")]
 mod macos_menu;

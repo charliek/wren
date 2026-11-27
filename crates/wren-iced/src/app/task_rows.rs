@@ -112,6 +112,8 @@ pub(super) enum What {
     Due(Option<Date>),
     /// The task form.
     Saved,
+    /// The description edited in place.
+    Description,
 }
 
 impl What {
@@ -134,6 +136,7 @@ impl What {
             Self::Due(Some(date)) => format!("Due {}", date.short()),
             Self::Due(None) => "Due date cleared".into(),
             Self::Saved => "Saved".into(),
+            Self::Description => "Description changed".into(),
         }
     }
 
@@ -181,6 +184,7 @@ impl App {
     /// A key of the list on the selected row. Returns whether it stops its
     /// batch: one that opens a menu, the calendar or the form does.
     pub(super) fn row_key(&mut self, act: RowAct) -> (Task<Message>, bool) {
+        self.cancel_describe();
         let Some(entry) = self.selected_row().filter(|_| act != RowAct::Refresh) else {
             if act == RowAct::Refresh {
                 self.task_list.held.clear();
@@ -210,7 +214,7 @@ impl App {
         {
             return None;
         }
-        if self.task_list.menu.is_some() {
+        if self.task_list.menu.is_some() || self.task_list.describe.is_some() {
             return Some(Task::none());
         }
         Some(match id {
@@ -239,6 +243,8 @@ impl App {
             }
             Cell::Priority => self.open_entry_menu(MenuKind::Priority, entry),
             Cell::Due => self.open_entry_calendar(entry),
+            // A click selects; a double-click edits it in place.
+            Cell::Description => Task::none(),
         }
     }
 
