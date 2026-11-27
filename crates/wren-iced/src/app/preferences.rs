@@ -833,11 +833,18 @@ impl App {
     pub(super) fn toggle_task_counts(&mut self) -> Gateway {
         let shown = !self.preferences.settings.task_counts;
         self.preferences.settings.task_counts = shown;
-        let outcome = self.save_toggle("task-counts", if shown { "on" } else { "off" });
-        if outcome.processed.disposition.committed() {
-            self.notify(super::notice::Notice::counts(shown));
-        }
-        outcome
+        self.apply_preferences();
+        let task = if self.palette.take().is_some() {
+            self.column_focus()
+        } else {
+            Task::none()
+        };
+        // The message says it was saved only when config.conf was written;
+        // either way the change holds for this session and can be undone.
+        let (written, warning) =
+            self.write_setting("task-counts", if shown { "on" } else { "off" });
+        self.notify(super::notice::Notice::counts(shown, written));
+        self.saved(warning, task)
     }
 
     /// Move the editor to the other engine, keeping its text and cursor
@@ -898,14 +905,22 @@ impl App {
     /// edits made outside Wren since the last reload apply now rather than
     /// being marked as seen. Returns the warning to report, if any.
     pub(super) fn save_setting(&mut self, key: &str, value: &str) -> Option<String> {
-        let path = self.preferences.path.clone()?;
+        self.write_setting(key, value).1
+    }
+
+    /// [`App::save_setting`], saying too whether `config.conf` was
+    /// written: not with no settings location, nor when the write failed.
+    pub(super) fn write_setting(&mut self, key: &str, value: &str) -> (bool, Option<String>) {
+        let Some(path) = self.preferences.path.clone() else {
+            return (false, None);
+        };
         match settings::write_value(&path, key, value) {
-            Ok(()) => self.reload_settings(true),
+            Ok(()) => (true, self.reload_settings(true)),
             Err(error) => {
                 let warning = format!("Could not save {key} to {}: {error}", path.display());
                 self.banner = Some(warning.clone());
                 self.banner_kind = workspace::WarningKind::General;
-                Some(warning)
+                (false, Some(warning))
             }
         }
     }

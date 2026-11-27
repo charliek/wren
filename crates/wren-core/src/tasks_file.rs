@@ -327,7 +327,7 @@ fn remapped(path: &RelPath, from: &RelPath, to: &RelPath) -> RelPath {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TasksFile {
     root: PathBuf,
     table: Table,

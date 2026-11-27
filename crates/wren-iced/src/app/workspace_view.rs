@@ -572,7 +572,7 @@ impl App {
                     &group.name,
                     group_count(model, group.id),
                     self.selected_group == Some(group.id),
-                    self.row_mark(ItemRef::Group(group.id)),
+                    self.group_mark(&group.path),
                 ));
                 count += 1;
             }

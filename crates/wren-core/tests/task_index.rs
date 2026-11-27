@@ -1379,3 +1379,63 @@ fn a_settings_file_wren_cannot_read_is_left_alone_with_a_warning() {
         bad
     );
 }
+
+/// Leaving a folder out is all or nothing (review of item 10.2): when
+/// `.wren/tasks.toml` cannot be written, the list, the counts and the
+/// file stay as they were and the op fails; a file published whose
+/// durability is unconfirmed keeps the change, with a warning.
+#[test]
+fn an_exclusion_that_cannot_be_saved_changes_nothing() {
+    use wren_core::fs_store::Fault;
+    let root = fixture();
+    let mut session = session(root.path());
+    let plans = ItemRef::Group(group(&session, "Work/Plans"));
+    let before = counts(&session, None);
+    let revision = tasks(&session).revision();
+    session.fail_next(Fault::Write);
+    let error = session
+        .apply_at(
+            Op::SetTasksExcluded {
+                target: plans,
+                excluded: true,
+            },
+            Duration::ZERO,
+        )
+        .unwrap_err();
+    assert!(error.message.contains("nothing changed"), "{error}");
+    assert!(tasks(&session).excluded().is_empty());
+    assert_eq!(counts(&session, None), before);
+    assert_eq!(tasks(&session).revision(), revision);
+    assert!(session.tasks_file().unwrap().excluded().is_empty());
+    assert!(!root.path().join(TASKS_FILE).exists());
+    // Asked again with the disk working, it is made and saved.
+    run(
+        &mut session,
+        Op::SetTasksExcluded {
+            target: plans,
+            excluded: true,
+        },
+    );
+    assert_eq!(tasks(&session).excluded(), [rel("Work/Plans")]);
+    assert!(fs::read_to_string(root.path().join(TASKS_FILE))
+        .unwrap()
+        .contains("Work/Plans"));
+    // Published but not confirmed durable: kept, with a warning.
+    session.fail_next(Fault::DirectorySync);
+    let events = session
+        .apply_at(
+            Op::SetTasksExcluded {
+                target: plans,
+                excluded: false,
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Event::Warning(_))));
+    assert!(tasks(&session).excluded().is_empty());
+    assert!(!fs::read_to_string(root.path().join(TASKS_FILE))
+        .unwrap()
+        .contains("Work/Plans"));
+}

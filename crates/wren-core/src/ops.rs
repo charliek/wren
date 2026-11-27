@@ -930,9 +930,7 @@ impl Session {
                     return Err("Only a section or a group can be left out of task views".into());
                 }
                 let path = self.item_path(target)?;
-                self.tasks_file_mut()?.set_excluded(&path, excluded)?;
-                self.sync_task_exclusions();
-                self.persist_tasks_file(events)
+                self.set_excluded_saved(&path, excluded, events)
             }
             Op::SetTaskFilters { scope, filters } => {
                 let path = scope.map(|scope| self.item_path(scope)).transpose()?;
@@ -2209,6 +2207,39 @@ impl Session {
         if let Some(file) = &self.tasks_file {
             self.index.exclude_tasks(&file.excluded());
         }
+    }
+
+    /// Leave `folder` out of task views, or bring it back, all or nothing:
+    /// when `.wren/tasks.toml` cannot be published, the list and the task
+    /// index stay as they were and the op fails. A file published whose
+    /// durability is unconfirmed keeps the change, with a warning.
+    fn set_excluded_saved(
+        &mut self,
+        folder: &RelPath,
+        excluded: bool,
+        events: &mut Vec<Event>,
+    ) -> Result<(), String> {
+        self.tasks_file_mut()?;
+        let Some(file) = self.tasks_file.as_mut() else {
+            return Ok(());
+        };
+        let before = file.clone();
+        if !file.set_excluded(folder, excluded)? {
+            return Ok(());
+        }
+        match file.save(&mut self.store) {
+            Ok(()) => {}
+            // Not published: as if nothing had been asked.
+            Err(error) if file.dirty() => {
+                *file = before;
+                return Err(format!(
+                    "Task settings were not saved, so nothing changed: {error}"
+                ));
+            }
+            Err(error) => events.push(Event::Warning(error)),
+        }
+        self.sync_task_exclusions();
+        Ok(())
     }
 
     /// Save `.wren/tasks.toml` if an op changed it. It is created only

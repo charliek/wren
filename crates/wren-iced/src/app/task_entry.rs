@@ -22,6 +22,7 @@
 
 use iced::widget::{button, container, row, tooltip};
 use iced::Element;
+use wren_core::fs_store::RelPath;
 use wren_core::model::{GroupId, ItemRef, NoteId, Parent};
 use wren_core::ops::Op;
 use wren_core::tasks::Counts;
@@ -43,13 +44,32 @@ pub(super) struct HeaderCount {
     pub pressed: bool,
 }
 
-/// The title of a hide on `item`, by whether its tasks are hidden now.
-pub(super) fn hide_title(item: ItemRef, hidden: bool) -> &'static str {
-    match (item, hidden) {
-        (ItemRef::Group(_), false) => "Hide tasks from this group",
-        (ItemRef::Group(_), true) => "Show this group\u{2019}s tasks again",
-        (_, false) => "Hide tasks in this note",
-        (_, true) => "Show tasks in this note again",
+/// How a group is left out of task views: by its own entry in
+/// `.wren/tasks.toml`, and by its section's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct GroupHidden {
+    pub own: bool,
+    pub inherited: bool,
+}
+
+/// The title of the hide on a group, or `None` when it offers none: a
+/// group its section alone hides has no entry of its own to change, and a
+/// group hidden both ways only loses its own entry, which brings nothing
+/// back while its section is out.
+fn group_hide_title(hidden: GroupHidden) -> Option<&'static str> {
+    match (hidden.own, hidden.inherited) {
+        (false, false) => Some("Hide tasks from this group"),
+        (true, false) => Some("Show this group\u{2019}s tasks again"),
+        (true, true) => Some("Remove this group\u{2019}s own exclusion"),
+        (false, true) => None,
+    }
+}
+
+fn note_hide_title(hidden: bool) -> &'static str {
+    if hidden {
+        "Show tasks in this note again"
+    } else {
+        "Hide tasks in this note"
     }
 }
 
@@ -173,25 +193,32 @@ impl App {
         tasks.flags(note).map(|flags| flags.hidden)
     }
 
-    /// Whether `group` is itself left out of task views: `None` with
-    /// tasks off or for no group of the workspace.
-    pub(super) fn group_tasks_hidden(&self, group: GroupId) -> Option<bool> {
+    /// How `group` is left out of task views: `None` with tasks off or
+    /// for no group of the workspace.
+    pub(super) fn group_tasks_hidden(&self, group: GroupId) -> Option<GroupHidden> {
         if !self.preferences.tasks {
             return None;
         }
         let session = self.session.as_ref()?;
         let path = &session.model().group(group)?.path;
-        Some(session.tasks()?.excluded().contains(path))
+        let excluded = session.tasks()?.excluded();
+        Some(GroupHidden {
+            own: excluded.contains(path),
+            inherited: excluded
+                .iter()
+                .any(|folder| folder != path && path.as_path().starts_with(folder.as_path())),
+        })
     }
 
-    /// Whether a hide on `item` would show its tasks again.
-    pub(super) fn item_tasks_hidden(&self, item: ItemRef) -> bool {
+    /// The title of the hide on `item` as things stand, or `None` when
+    /// `item` offers none (a board, a section, a group only its section
+    /// hides, or tasks off).
+    pub(super) fn hide_title(&self, item: ItemRef) -> Option<&'static str> {
         match item {
-            ItemRef::Group(group) => self.group_tasks_hidden(group),
-            ItemRef::Note(note) => self.note_tasks_hidden(note),
+            ItemRef::Group(group) => group_hide_title(self.group_tasks_hidden(group)?),
+            ItemRef::Note(note) => Some(note_hide_title(self.note_tasks_hidden(note)?)),
             ItemRef::Section(_) => None,
         }
-        .unwrap_or(false)
     }
 
     /// The muted mark a row carries, if any: "tasks off" on a note its
@@ -205,12 +232,19 @@ impl App {
         let tasks = session.tasks()?;
         match item {
             ItemRef::Note(note) => tasks.flags(note)?.hidden.then_some("tasks off"),
-            ItemRef::Group(group) => {
-                let path = &session.model().group(group)?.path;
-                tasks.is_excluded(path).then_some("hidden")
-            }
+            ItemRef::Group(group) => self.group_mark(&session.model().group(group)?.path),
             ItemRef::Section(_) => None,
         }
+    }
+
+    /// A group row's mark, by the group's path: "hidden" when it or its
+    /// section is left out of task views.
+    pub(super) fn group_mark(&self, path: &RelPath) -> Option<&'static str> {
+        if !self.preferences.tasks {
+            return None;
+        }
+        let tasks = self.session.as_ref()?.tasks()?;
+        tasks.is_excluded(path).then_some("hidden")
     }
 
     /// A row's mark, drawn small and muted in a thin frame.
@@ -239,13 +273,8 @@ impl App {
         if id.tasks() && !self.preferences.tasks {
             return false;
         }
-        match (id, item) {
-            (CommandId::HideNoteTasks, ItemRef::Note(note)) => {
-                self.note_tasks_hidden(note).is_some()
-            }
-            (CommandId::HideGroupTasks, ItemRef::Group(group)) => {
-                self.group_tasks_hidden(group).is_some()
-            }
+        match id {
+            CommandId::HideNoteTasks | CommandId::HideGroupTasks => self.hide_title(item).is_some(),
             _ => true,
         }
     }
@@ -262,7 +291,7 @@ impl App {
             }
             .into(),
             CommandId::HideGroupTasks | CommandId::HideNoteTasks => {
-                hide_title(item, self.item_tasks_hidden(item)).into()
+                self.hide_title(item).unwrap_or_default().into()
             }
             _ => super::commands::definitions()
                 .find(|definition| definition.id == id)
@@ -277,26 +306,38 @@ impl App {
         let Some(hidden) = self.group_tasks_hidden(group) else {
             return self.blocked("The group no longer exists");
         };
+        if !hidden.own && hidden.inherited {
+            return self.blocked("Its section hides this group's tasks");
+        }
         let place = self.model().and_then(|model| {
             let group = model.group(group)?;
             let section = model.section(group.section)?;
             Some(format!("{}/{}", section.name, group.name))
         });
+        // Saved or not at all: a file that cannot be written leaves the
+        // group as it was, and the refusal is the outcome's.
         let outcome = self.process_core(Op::SetTasksExcluded {
             target: ItemRef::Group(group),
-            excluded: !hidden,
+            excluded: !hidden.own,
         });
         if outcome.processed.disposition.committed() {
             let place = place.unwrap_or_default();
-            let words = if hidden {
-                format!("{place} back in task summaries · saved in .wren/tasks.toml")
-            } else {
-                format!("{place} hidden from task summaries · saved in .wren/tasks.toml")
+            let words = match (hidden.own, hidden.inherited) {
+                (false, _) => {
+                    format!("{place} hidden from task summaries · saved in .wren/tasks.toml")
+                }
+                (true, false) => {
+                    format!("{place} back in task summaries · saved in .wren/tasks.toml")
+                }
+                (true, true) => format!(
+                    "{place} no longer hidden on its own · its section still hides its tasks \
+                     · saved in .wren/tasks.toml"
+                ),
             };
             self.notify(
                 Notice::new(vec![Part::Text(words)]).with_undo(Undo::Excluded {
                     group,
-                    excluded: hidden,
+                    excluded: hidden.own,
                 }),
             );
         }
@@ -434,7 +475,7 @@ impl App {
             |path: &wren_core::fs_store::RelPath| path.as_path().to_string_lossy().into_owned();
         let (groups, notes) = self.model().map_or_else(Default::default, |model| {
             let groups: Vec<String> = (model.groups.iter())
-                .filter(|group| self.row_mark(ItemRef::Group(group.id)).is_some())
+                .filter(|group| self.group_mark(&group.path).is_some())
                 .map(|group| path(&group.path))
                 .collect();
             let notes: Vec<String> = (model.notes.iter())
@@ -835,7 +876,13 @@ mod tests {
         let stored = on_disk(&directory, ".wren/tasks.toml");
         assert!(stored.contains("Work/Tasks"), "{stored}");
         assert_eq!(app.row_mark(item), Some("hidden"));
-        assert_eq!(app.group_tasks_hidden(tasks), Some(true));
+        assert_eq!(
+            app.group_tasks_hidden(tasks),
+            Some(GroupHidden {
+                own: true,
+                inherited: false
+            })
+        );
         assert_eq!(counts(&app, Column::Sections).unwrap().1, 2);
         assert_eq!(counts(&app, Column::Notes).unwrap().1, 0);
         assert_eq!(
@@ -1121,5 +1168,207 @@ mod tests {
             let (off, _) = super::super::preferences::build_keymap(scheme, &[], false);
             assert_eq!(off.accel("tasks.show"), None);
         }
+    }
+
+    fn hide(app: &mut App, item: ItemRef, excluded: bool) {
+        let outcome = app.process_core(Op::SetTasksExcluded {
+            target: item,
+            excluded,
+        });
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
+    }
+
+    /// Review of 10.2, finding 1: the message's widgets are keyed by its
+    /// serial. A press on one message's Undo and its release on the
+    /// message that replaced it undoes nothing, and the release is taken
+    /// there, never reaching what the message covers; on the same message
+    /// the press and release are its Undo.
+    #[test]
+    fn a_press_on_a_replaced_message_never_undoes_the_new_one() {
+        use iced::advanced::layout::{self, Layout};
+        use iced::advanced::widget::Tree;
+        use iced::advanced::Shell;
+        use iced::mouse::{self as pointer, Button};
+        use iced::{Event as Input, Length, Point, Rectangle, Size};
+
+        type Frame<'a> = Element<'a, Message, iced::Theme, ()>;
+        let make = |serial: u64| -> Frame<'static> {
+            super::super::notice::frame_for_tests(
+                serial,
+                iced::widget::Space::new()
+                    .width(Length::Fixed(200.0))
+                    .height(Length::Fixed(20.0))
+                    .into(),
+                Some(
+                    iced::widget::Space::new()
+                        .width(Length::Fixed(40.0))
+                        .height(Length::Fixed(16.0))
+                        .into(),
+                ),
+                wren_core::theme::DARK,
+            )
+        };
+        let limits = layout::Limits::new(Size::ZERO, Size::new(600.0, 100.0));
+        let viewport = Rectangle::new(Point::ORIGIN, Size::new(600.0, 100.0));
+        // Each event on a frame of `serial`, as the window would send it at
+        // `at`: what it published, and whether it was taken.
+        let send = |frame: &mut Frame<'static>,
+                    tree: &mut Tree,
+                    event: Input,
+                    at: Point|
+         -> (Vec<Message>, bool) {
+            frame.as_widget_mut().diff(tree);
+            let node = frame.as_widget_mut().layout(tree, &(), &limits);
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            frame.as_widget_mut().update(
+                tree,
+                &event,
+                Layout::new(&node),
+                pointer::Cursor::Available(at),
+                &(),
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+            let taken = shell.is_event_captured();
+            (messages, taken)
+        };
+        let mut first = make(1);
+        let mut tree = Tree::new(&first);
+        let node = first.as_widget_mut().layout(&mut tree, &(), &limits);
+        // The Undo button: the frame's message, its face, its line, the
+        // line's second child.
+        let mut undo = Layout::new(&node);
+        for step in [0, 0, 0, 1] {
+            undo = undo.children().nth(step).unwrap();
+        }
+        let at = undo.bounds().center();
+        let words = Point::new(undo.bounds().x - 100.0, at.y);
+        let press = Input::Mouse(pointer::Event::ButtonPressed(Button::Left));
+        let release = Input::Mouse(pointer::Event::ButtonReleased(Button::Left));
+
+        // The same message: the press and release are its Undo.
+        assert!(send(&mut first, &mut tree, press.clone(), at).1);
+        let (messages, taken) = send(&mut first, &mut tree, release.clone(), at);
+        assert!(taken);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [Message::Notice(super::super::notice::Event::Undo(1))]
+            ),
+            "{messages:?}"
+        );
+
+        // Pressed on message 1, released on message 2 in its place.
+        assert!(send(&mut first, &mut tree, press.clone(), at).1);
+        let mut second = make(2);
+        let (messages, taken) = send(&mut second, &mut tree, release.clone(), at);
+        assert!(messages.is_empty(), "{messages:?}");
+        assert!(taken, "the release is the message's, not the pane's");
+        // And on the message's words, nor its dismissal.
+        assert!(send(&mut first, &mut tree, press.clone(), words).1);
+        let (messages, taken) = send(&mut second, &mut tree, release, words);
+        assert!(messages.is_empty() && taken, "{messages:?}");
+    }
+
+    /// Review of 10.2, finding 3: the counts' message says they were saved
+    /// only when config.conf was written; otherwise they hold for this
+    /// session, with Undo.
+    #[test]
+    fn counts_that_cannot_be_saved_are_said_to_hold_for_this_session() {
+        let (directory, mut app) = fixture();
+        let blocked = directory.path().join("blocked");
+        std::fs::write(&blocked, "a file, not a directory").unwrap();
+        app.preferences.path = Some(blocked.join("config.conf"));
+        let outcome = app.dispatch(Command::Run(CommandId::ToggleTaskCounts));
+        assert_eq!(outcome.processed.disposition, Disposition::CommittedWarning);
+        assert!(!app.task_counts_shown());
+        let shown = app.notice().unwrap();
+        assert_eq!(
+            shown.notice.text(),
+            "Task counts hidden for this session · task-counts = off was not saved to config.conf"
+        );
+        assert_eq!(shown.notice.undo, Some(Undo::Counts(true)));
+        let _ = undo(&mut app);
+        assert!(app.task_counts_shown());
+        // With no settings location at all, likewise.
+        app.preferences.path = None;
+        let _ = app.dispatch(Command::Run(CommandId::ToggleTaskCounts));
+        assert!(app
+            .notice()
+            .unwrap()
+            .notice
+            .text()
+            .ends_with("was not saved to config.conf"));
+    }
+
+    /// Review of 10.2, finding 2: a group's exclusion that cannot be saved
+    /// changes nothing, says why, and leaves no message.
+    #[test]
+    fn hiding_a_group_that_cannot_be_saved_changes_nothing() {
+        let (directory, mut app) = fixture();
+        let tasks = group(&app, GROUP);
+        let item = ItemRef::Group(tasks);
+        let before = counts(&app, Column::Sections);
+        app.session
+            .as_mut()
+            .unwrap()
+            .fail_next(wren_core::fs_store::Fault::Write);
+        let outcome = act(&mut app, item, CommandId::HideGroupTasks);
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        let warning = outcome.processed.warning.unwrap_or_default();
+        assert!(warning.contains("nothing changed"), "{warning}");
+        assert_eq!(app.row_mark(item), None);
+        assert_eq!(counts(&app, Column::Sections), before);
+        assert!(app.notice().is_none());
+        assert!(!file(&directory, ".wren/tasks.toml").exists());
+        assert_eq!(app.hide_title(item), Some("Hide tasks from this group"));
+    }
+
+    /// Review of 10.2, finding 4: a group its section hides too offers to
+    /// remove its own entry, says the section still hides it, and once only
+    /// the section hides it offers no hide at all.
+    #[test]
+    fn a_group_its_section_also_hides_says_so() {
+        let (_directory, mut app) = fixture();
+        let tasks = group(&app, GROUP);
+        let item = ItemRef::Group(tasks);
+        let work = ItemRef::Section(section(&app, "Work"));
+        hide(&mut app, work, true);
+        hide(&mut app, item, true);
+        assert_eq!(
+            app.group_tasks_hidden(tasks),
+            Some(GroupHidden {
+                own: true,
+                inherited: true
+            })
+        );
+        assert_eq!(
+            app.hide_title(item),
+            Some("Remove this group\u{2019}s own exclusion")
+        );
+        let outcome = act(&mut app, item, CommandId::HideGroupTasks);
+        assert_eq!(outcome.processed.disposition, Disposition::Completed);
+        assert_eq!(
+            app.notice().unwrap().notice.text(),
+            "Work/Tasks no longer hidden on its own · its section still hides its tasks \
+             · saved in .wren/tasks.toml"
+        );
+        assert_eq!(app.row_mark(item), Some("hidden"));
+        assert_eq!(counts(&app, Column::Notes).unwrap().1, 0);
+        // Only its section hides it now: no hide is offered.
+        assert_eq!(app.hide_title(item), None);
+        assert!(!app.item_command_offered(item, CommandId::HideGroupTasks));
+        assert!(!row_actions(&mut app, item)
+            .iter()
+            .any(|title| title.contains("exclusion") || title.starts_with("Hide")));
+        assert!(!app.command_enabled(CommandId::HideGroupTasks));
+        let outcome = act(&mut app, item, CommandId::HideGroupTasks);
+        assert_eq!(outcome.processed.disposition, Disposition::Blocked);
+        // The message's Undo puts its own entry back.
+        let _ = app.dispatch(Command::Run(CommandId::ShowTasks));
+        hide(&mut app, work, false);
+        assert_eq!(app.hide_title(item), Some("Hide tasks from this group"));
     }
 }

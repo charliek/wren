@@ -16,8 +16,10 @@
 
 use std::time::{Duration, Instant};
 
+use iced::advanced::widget::{Operation, Tree};
+use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::widget::{button, container, rich_text, row, span};
-use iced::{Element, Fill, Task};
+use iced::{Element, Fill, Rectangle, Task};
 use wren_core::model::{GroupId, ItemRef};
 use wren_core::ops::Op;
 
@@ -95,18 +97,25 @@ impl Notice {
             .collect()
     }
 
-    /// After the counts were shown or hidden and the choice saved.
-    pub(super) fn counts(shown: bool) -> Self {
+    /// After the counts were shown or hidden: saved to config.conf when
+    /// `written`, else for this session only.
+    pub(super) fn counts(shown: bool, written: bool) -> Self {
         let value = if shown { "on" } else { "off" };
-        Self::new(vec![
-            Part::Text(format!(
-                "Task counts {} · saved ",
-                if shown { "shown" } else { "hidden" }
-            )),
-            Part::Code(format!("task-counts = {value}")),
-            Part::Text(" to config.conf".into()),
-        ])
-        .with_undo(Undo::Counts(!shown))
+        let done = if shown { "shown" } else { "hidden" };
+        let parts = if written {
+            vec![
+                Part::Text(format!("Task counts {done} · saved ")),
+                Part::Code(format!("task-counts = {value}")),
+                Part::Text(" to config.conf".into()),
+            ]
+        } else {
+            vec![
+                Part::Text(format!("Task counts {done} for this session · ")),
+                Part::Code(format!("task-counts = {value}")),
+                Part::Text(" was not saved to config.conf".into()),
+            ]
+        };
+        Self::new(parts).with_undo(Undo::Counts(!shown))
     }
 }
 
@@ -194,8 +203,7 @@ impl App {
     /// The message, centred at the foot of the pane over what it shows.
     pub(super) fn notice_view(&self) -> Option<Element<'_, Message>> {
         let shown = self.notice.as_ref()?;
-        let definition = self.definition;
-        let colors = definition.colors;
+        let colors = self.definition.colors;
         let ink = theme::color(colors.editor);
         let spans = shown.notice.parts.iter().map(|part| match part {
             Part::Text(text) => span(text.clone()).font(fonts::UI).size(12.5),
@@ -205,40 +213,212 @@ impl App {
             rich_text::<(), Message, iced::Theme, iced::Renderer>(spans.collect::<Vec<_>>())
                 .color(ink)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
-        let serial = shown.serial;
-        let mut line = row![words].spacing(10).align_y(iced::Center);
-        if shown.notice.undo.is_some() {
-            line = line.push(
-                button(
-                    chrome::label("Undo", 12, colors.editor)
-                        .font(fonts::SEMIBOLD)
-                        .wrapping(iced::widget::text::Wrapping::None),
-                )
+        let undo = shown.notice.undo.map(|_| {
+            chrome::label("Undo", 12, colors.editor)
+                .font(fonts::SEMIBOLD)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into()
+        });
+        Some(frame(shown.serial, words.into(), undo, self.definition))
+    }
+}
+
+/// A message's frame around `words` and the face of its Undo, for the
+/// message `serial`. Its widgets' state is the serial's (iced's keyed
+/// column keeps a child's state when only its key changes, so the frame
+/// keys itself), so a press on one message is never the press of the one
+/// that replaces it: the release that ends it there finds a button no
+/// press began, which does nothing. Every press and release over the
+/// message is its own, so none reaches what it covers.
+pub(super) fn frame<'a, R>(
+    serial: u64,
+    words: Element<'a, Message, iced::Theme, R>,
+    undo: Option<Element<'a, Message, iced::Theme, R>>,
+    definition: wren_core::theme::Theme,
+) -> Element<'a, Message, iced::Theme, R>
+where
+    R: iced::advanced::text::Renderer + 'a,
+{
+    let colors = definition.colors;
+    let mut line = row![words].spacing(10).align_y(iced::Center);
+    if let Some(face) = undo {
+        line = line.push(
+            button(face)
                 .padding([2, 8])
                 .on_press(Message::Notice(Event::Undo(serial)))
                 .style(move |_, status| undo_button(definition, status)),
-            );
+        );
+    }
+    let message = button(
+        container(line)
+            .id("task-notice")
+            .padding(iced::Padding {
+                top: 7.0,
+                right: 8.0,
+                bottom: 7.0,
+                left: 12.0,
+            })
+            .style(move |_| chrome::surface(definition, colors.text, 7.0, false)),
+    )
+    .padding(0)
+    .on_press(Message::Notice(Event::Dismiss(serial)))
+    .style(|_, _| button::Style::default());
+    container(Owned {
+        serial,
+        content: message.into(),
+    })
+    .width(Fill)
+    .center_x(Fill)
+    .padding([0, 16])
+    .into()
+}
+
+#[cfg(test)]
+pub(super) use frame as frame_for_tests;
+
+/// The message `serial`'s content: its state starts afresh when another
+/// message takes its place, and it takes every mouse press and release
+/// over it that nothing inside it took.
+struct Owned<'a, R> {
+    serial: u64,
+    content: Element<'a, Message, iced::Theme, R>,
+}
+
+impl<'a, R: iced::advanced::Renderer + 'a> From<Owned<'a, R>>
+    for Element<'a, Message, iced::Theme, R>
+{
+    fn from(owned: Owned<'a, R>) -> Self {
+        Element::new(owned)
+    }
+}
+
+impl<R: iced::advanced::Renderer> iced::advanced::Widget<Message, iced::Theme, R> for Owned<'_, R> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<u64>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(self.serial)
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        let serial = tree.state.downcast_mut::<u64>();
+        if *serial == self.serial {
+            tree.diff_children(std::slice::from_ref(&self.content));
+        } else {
+            *serial = self.serial;
+            tree.children = vec![Tree::new(&self.content)];
         }
-        let message = button(
-            container(line)
-                .id("task-notice")
-                .padding(iced::Padding {
-                    top: 7.0,
-                    right: 8.0,
-                    bottom: 7.0,
-                    left: 12.0,
-                })
-                .style(move |_| chrome::surface(definition, colors.text, 7.0, false)),
+    }
+
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &R, limits: &layout::Limits) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &R,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &iced::Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &R,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        let button = matches!(
+            event,
+            iced::Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::ButtonReleased(_))
+        );
+        if button && !shell.is_event_captured() && cursor.is_over(layout.bounds()) {
+            shell.capture_event();
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &R,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
         )
-        .padding(0)
-        .on_press(Message::Notice(Event::Dismiss(serial)))
-        .style(|_, _| button::Style::default());
-        Some(
-            container(message)
-                .width(Fill)
-                .center_x(Fill)
-                .padding([0, 16])
-                .into(),
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut R,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &R,
+        viewport: &Rectangle,
+        translation: iced::Vector,
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, R>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
         )
     }
 }

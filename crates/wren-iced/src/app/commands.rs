@@ -1294,9 +1294,8 @@ impl App {
                     CommandId::HideGroupTasks => self.selected_group.map(ItemRef::Group),
                     _ => self.selected_note.map(ItemRef::Note),
                 };
-                item.map_or(definition.label, |item| {
-                    super::task_entry::hide_title(item, self.item_tasks_hidden(item))
-                })
+                item.and_then(|item| self.hide_title(item))
+                    .unwrap_or(definition.label)
             }
             _ => definition.label,
         }
@@ -1363,10 +1362,12 @@ impl App {
             TaskEdit => self.task_form_can_open(),
             ShowTasks => self.session.is_some(),
             ToggleTaskCounts => true,
-            HideGroupTasks => self.selected_group.is_some() && self.session.is_some(),
+            HideGroupTasks => self
+                .selected_group
+                .is_some_and(|group| self.hide_title(ItemRef::Group(group)).is_some()),
             HideNoteTasks => self
                 .selected_note
-                .is_some_and(|note| self.note_tasks_hidden(note).is_some()),
+                .is_some_and(|note| self.hide_title(ItemRef::Note(note)).is_some()),
             // Their keys are the editor's own; see their rows.
             EditUndo | EditRedo | EditCopy | EditCut | EditPaste | EditSelectAll => false,
             SpellSuggest => {
