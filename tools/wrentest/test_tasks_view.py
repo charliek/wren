@@ -25,6 +25,7 @@ import shutil
 import pytest
 
 from tools.wrentest import test_gestures as native
+from tools.wrentest.boards import fitted
 from tools.wrentest.client import RemoteError
 from tools.wrentest.test_navigation import command, core, item, navigation, session
 from tools.wrentest.test_setup import artifact_directory
@@ -246,7 +247,9 @@ def test_back_and_forward_pass_through_the_view_by_command_and_by_key(tmp_path: 
         assert state_file(root) == written
 
         # A view over the board puts the viewer away whole; Back mounts it
-        # again as it was, with the keyboard.
+        # again as it was, with the keyboard. Its first fit settles first,
+        # so the snapshot is of the board as it was shown.
+        fitted(app)
         board = app.client.call("board.get")
         show(app, "note", LIST)
         shown(app, "note", LIST, "List", FLOW)
