@@ -56,6 +56,10 @@ pub struct TaskRecord {
     /// The line exactly as written, without its ending: what a change to
     /// the task expects to find there.
     pub source: String,
+    /// Where the box's `[` is in [`TaskRecord::source`]: the task as the
+    /// note reads it, which the line read alone may not say (a task nested
+    /// in a quote or a list reads as indented code by itself).
+    pub box_at: usize,
     /// The character in the box.
     pub symbol: char,
     pub status: StatusType,
@@ -372,6 +376,7 @@ fn read_lines<L: Lines + ?Sized>(
                     path: path.clone(),
                     line: index,
                     source: text.to_owned(),
+                    box_at: found.start,
                     symbol: found.symbol,
                     status: found.status,
                     due: parsed.due().map(|token| token.value),
@@ -1330,6 +1335,13 @@ mod tests {
         let at = tasks[5].due_at.clone().unwrap();
         assert_eq!(&tasks[5].source[at], "2026-02-30");
         assert_eq!(tasks[4].due_at, None);
+        // Where the box is, as the note reads the line: a task nested in a
+        // quote's list is indented code read alone.
+        assert_eq!(tasks[0].box_at, 2);
+        let nested = read("> - Parent\n>     - [ ] Child\n");
+        assert_eq!(nested.len(), 1);
+        assert_eq!(&nested[0].source[nested[0].box_at..][..3], "[ ]");
+        assert_eq!(nested[0].box_at, 8);
         // The due date the line's tokens read, not a glyph further on.
         let kept = read("- [ ] Repair 📅 2026-02-30 [meta:: 📅 2026-04-31]");
         assert_eq!(

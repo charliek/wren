@@ -815,7 +815,7 @@ impl App {
                         "priority": list.drawn(Control::Cell(entry, Cell::Priority)).map(rectangle),
                         "due": list.drawn(Control::Cell(entry, Cell::Due)).map(rectangle),
                     },
-                    "held": list.held.iter().any(|hold| hold.note == record.note && hold.line == record.line),
+                    "held": list.held.iter().any(|hold| hold.holds(record)),
                 })
             })
             .collect();

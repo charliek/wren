@@ -466,23 +466,20 @@ impl App {
     }
 
     /// Open the form for the task of a row of the task view, read from the
-    /// row's line, and give its description field the keyboard. `None`
-    /// with no task view showing, or where the line reads as no task.
-    pub(super) fn open_row_task_form(&mut self, target: RowTarget) -> Option<Task<Message>> {
+    /// row's line with its box at byte `boxed`, where the task index found
+    /// it, and give its description field the keyboard. `None` with no task
+    /// view showing, or where there is no task there. Save plans the fields
+    /// changed on the note's own line.
+    pub(super) fn open_row_task_form(
+        &mut self,
+        target: RowTarget,
+        boxed: usize,
+    ) -> Option<Task<Message>> {
         if !self.preferences.tasks || self.dialog.is_some() || self.surface() != Surface::Tasks {
             return None;
         }
-        // A nested task's line read alone would be indented code: the
-        // form reads it without what indents it, and Save plans its change
-        // on the note's own line.
-        let options = wren_markdown::Options {
-            tasks: Some(wren_markdown::TaskOptions {
-                today: self.today(),
-            }),
-            ..wren_markdown::Options::default()
-        };
-        let form = Form::open(&[target.expect.trim_start()], 0, &options)
-            .filter(|form| form.kind() == FormKind::Edit)?;
+        let task = super::task_menus::row_task(&target.expect, boxed)?.task();
+        let form = Form::edit_task(target.line, &target.expect, task, self.today())?;
         self.palette = None;
         // A calendar over the row closes for it, writing nothing.
         self.calendar = None;
@@ -959,7 +956,7 @@ impl App {
             Ok(change) => change,
             Err(problem) => return self.blocked(problem.to_string()).task,
         };
-        let written = self.write_view_row(target, change, super::task_rows::What::Saved);
+        let written = self.write_view_row(target, None, change, super::task_rows::What::Saved);
         if let Err(refusal) = &written.result {
             if let Some(open) = &mut self.task_form {
                 open.error = Some(refusal.message.clone());

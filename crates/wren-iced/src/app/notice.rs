@@ -178,7 +178,7 @@ impl App {
                 if self.task_writes.mark() != Some(mark) {
                     return self.blocked("That change can no longer be undone here");
                 }
-                self.undo_task_write().gateway
+                self.undo_and_report()
             }
             Undo::Excluded { group, excluded } => self.process_core(Op::SetTasksExcluded {
                 target: ItemRef::Group(group),

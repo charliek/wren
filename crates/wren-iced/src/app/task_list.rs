@@ -206,20 +206,57 @@ impl RowKey {
     }
 }
 
-/// A row the view wrote, held where it stood when first written until the
-/// list is refreshed (R): in its group, at its place there, and shown
-/// whatever the filters now say of it (discovery/tasks-build.md item 10.4,
-/// the prototype's sticky rows). Found by its note and line, which a write
-/// to the line keeps.
+/// A task the view wrote, held where its rows stood when it was first
+/// written until the list is refreshed (R): in each group that showed it,
+/// at its place there, and shown whatever the filters now say of it
+/// (discovery/tasks-build.md item 10.4, the prototype's sticky rows).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Hold {
     pub note: NoteId,
+    /// The line it is on, and the line as the view's last write left it:
+    /// a task that no longer reads so is no longer held
+    /// ([`Hold::relocate`]).
     pub line: usize,
+    pub source: String,
+    /// Where each of its rows stood.
+    pub places: Vec<Place>,
+}
+
+/// Where one row of a held task stood.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Place {
     pub group: GroupKey,
     /// The group's label and detail, for a group the row alone now keeps.
     pub label: (String, String),
     /// Its place among the group's rows.
     pub index: usize,
+}
+
+impl Hold {
+    /// Whether `record` is the task held.
+    pub fn holds(&self, record: &TaskRecord) -> bool {
+        record.note == self.note && record.line == self.line && record.source == self.source
+    }
+
+    /// Find the task held among `records` (the scope's): on its line, or
+    /// the one line of the note that reads as it does. `false` when it is
+    /// there no more, or twice elsewhere: the hold is let go.
+    pub fn relocate<'a>(&mut self, records: impl Iterator<Item = &'a TaskRecord>) -> bool {
+        let found: Vec<usize> = records
+            .filter(|record| record.note == self.note && record.source == self.source)
+            .map(|record| record.line)
+            .collect();
+        if found.contains(&self.line) {
+            return true;
+        }
+        match found.as_slice() {
+            [line] => {
+                self.line = *line;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A scope's tasks as a view lists them.
@@ -268,10 +305,7 @@ impl Listing {
         place: &dyn Fn(&TaskRecord) -> (String, String),
         held: &[Hold],
     ) -> Self {
-        let hold_of = |record: &TaskRecord| {
-            held.iter()
-                .find(|hold| hold.note == record.note && hold.line == record.line)
-        };
+        let hold_of = |record: &TaskRecord| held.iter().find(|hold| hold.holds(record));
         let mut chip_counts = [0; 4];
         let mut owners: Vec<(String, String)> = Vec::new();
         let mut kept = Vec::new();
@@ -314,7 +348,9 @@ impl Listing {
         for &index in &kept {
             let record = &records[index];
             if let Some(hold) = hold_of(record) {
-                add(hold.group.clone(), index, &|| hold.label.clone());
+                for place in &hold.places {
+                    add(place.group.clone(), index, &|| place.label.clone());
+                }
                 continue;
             }
             match filters.group_by {
@@ -379,9 +415,9 @@ impl Listing {
             // A held row goes back to its place, the others round it.
             let mut pinned: Vec<(usize, usize)> = (group.rows.iter())
                 .filter_map(|&row| {
-                    hold_of(&records[row])
-                        .filter(|hold| hold.group == group.key)
-                        .map(|hold| (hold.index, row))
+                    let hold = hold_of(&records[row])?;
+                    let place = hold.places.iter().find(|place| place.group == group.key)?;
+                    Some((place.index, row))
                 })
                 .collect();
             if !pinned.is_empty() {

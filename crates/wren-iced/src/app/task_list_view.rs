@@ -157,6 +157,8 @@ pub(super) enum MenuFor {
     Row {
         kind: super::task_menus::MenuKind,
         target: super::task_target::RowTarget,
+        /// Where the task's box is in its line, as the task index found it.
+        boxed: usize,
         entry: usize,
         generation: u64,
     },
@@ -269,6 +271,9 @@ pub(super) struct ListState {
     /// Something in that batch opened, closed or was pressed: the rest of
     /// it is dropped.
     stopped: bool,
+    /// A key reached the menu over the view in that batch: no press after
+    /// it there chooses a row (discovery/tasks.md §6.2).
+    menu_keyed: bool,
     /// The app's copies still to come of the batch's Escapes and
     /// shortcuts, in order, each with whether it is dropped.
     copies: std::collections::VecDeque<(AppCopy, bool)>,
@@ -463,6 +468,15 @@ impl App {
             .is_some_and(|old| old.scope != scope || old.workspace != workspace)
         {
             self.task_list.held.clear();
+        }
+        // A held task is found again where the index has it now, or let go.
+        if !self.task_list.held.is_empty()
+            && (self.task_list.built.as_ref()).is_none_or(|old| old.revision != revision)
+        {
+            if let Some(tasks) = self.session.as_ref().and_then(|session| session.tasks()) {
+                let prefix = scope.prefix();
+                (self.task_list.held).retain_mut(|hold| hold.relocate(tasks.tasks_under(prefix)));
+            }
         }
         let Some(session) = &self.session else {
             return Task::none();
@@ -665,6 +679,7 @@ impl App {
         if serial != list.batch {
             list.batch = serial;
             list.stopped = false;
+            list.menu_keyed = false;
             list.copies.clear();
         }
     }
@@ -702,10 +717,26 @@ impl App {
                 }
                 Task::none()
             }
-            // A shortcut is the app's, through its copy.
-            Some(copy) => {
-                self.task_list.copies.push_back((copy, false));
-                Task::none()
+            // The view's own chords (toggle and undo) act here, in their
+            // place in the batch, and their copy is spent; any other
+            // shortcut is the app's, through its copy.
+            Some(AppCopy::Shortcut(accel)) => {
+                let id = (self.preferences.keymap.action(&accel))
+                    .and_then(super::commands::CommandId::parse);
+                match id.and_then(|id| self.task_view_shortcut(id)) {
+                    Some(task) => {
+                        self.task_list
+                            .copies
+                            .push_back((AppCopy::Shortcut(accel), true));
+                        task
+                    }
+                    None => {
+                        self.task_list
+                            .copies
+                            .push_back((AppCopy::Shortcut(accel), false));
+                        Task::none()
+                    }
+                }
             }
             None => {
                 let (task, stops) = self.task_list_press(&press);
@@ -743,8 +774,14 @@ impl App {
                 press.text.as_deref(),
             ) {
                 MenuKey::Choose(row) => (self.choose_task_menu(row), true),
-                MenuKey::Moved => (self.reveal_task_menu(), false),
-                MenuKey::Held => (Task::none(), false),
+                MenuKey::Moved => {
+                    self.task_list.menu_keyed = true;
+                    (self.reveal_task_menu(), false)
+                }
+                MenuKey::Held => {
+                    self.task_list.menu_keyed = true;
+                    (Task::none(), false)
+                }
             };
         }
         if press.key == Key::Named(Named::Tab) {
@@ -1003,7 +1040,7 @@ impl App {
             .task_list
             .drawn(control)
             .unwrap_or_else(|| self.unplaced_anchor());
-        self.open_host_menu(purpose, title.map(str::to_owned), rows, anchor)
+        self.open_host_menu(purpose, title.map(str::to_owned), rows, anchor, None)
     }
 
     /// Where a menu hangs whose control was never drawn.
@@ -1014,22 +1051,22 @@ impl App {
         )
     }
 
-    /// Open a menu over the view, under `anchor`, in place of any open.
+    /// Open a menu over the view, under `anchor`, in place of any open,
+    /// with the row `selected` selected, or else the checked one.
     pub(super) fn open_host_menu(
         &mut self,
         purpose: MenuFor,
         title: Option<String>,
         rows: Vec<Row>,
         anchor: Rectangle,
+        selected: Option<u32>,
     ) -> Task<Message> {
         self.task_list.menus += 1;
-        self.task_list.menu = Some(HostMenu::new(
-            self.task_list.menus,
-            purpose,
-            title,
-            rows,
-            anchor,
-        ));
+        let mut menu = HostMenu::new(self.task_list.menus, purpose, title, rows, anchor);
+        if let Some(id) = selected {
+            menu.select_id(id);
+        }
+        self.task_list.menu = Some(menu);
         self.reveal_task_menu()
     }
 
@@ -1058,12 +1095,13 @@ impl App {
         };
         if let MenuFor::Row {
             target,
+            boxed,
             entry,
             generation,
             ..
         } = menu.purpose
         {
-            return self.choose_row_menu(&target, entry, generation, row);
+            return self.choose_row_menu(&target, boxed, entry, generation, row);
         }
         let row = row as usize;
         match menu.purpose {
@@ -1261,6 +1299,10 @@ impl App {
                 self.task_list.focus = None;
                 let selected = self.select_entry(entry);
                 let acted = self.click_cell(entry, cell);
+                // The calendar the click opened takes the keyboard alone.
+                if self.calendar.is_some() || self.task_form.is_some() {
+                    return Task::batch([selected, acted]);
+                }
                 Task::batch([selected, acted, self.column_focus()])
             }
             Click::RowMenu { generation, entry } => {
@@ -1270,7 +1312,7 @@ impl App {
                 self.column = Column::Editor;
                 self.task_list.focus = None;
                 let selected = self.select_entry(entry);
-                let opened = self.open_row_menu(super::task_menus::MenuKind::Task, entry);
+                let opened = self.open_entry_menu(super::task_menus::MenuKind::Task, entry);
                 Task::batch([selected, opened, self.column_focus()])
             }
             Click::Control(control) => {
@@ -1283,6 +1325,11 @@ impl App {
             }
             Click::Menu(event) => match event {
                 host_menu::Event::Choose { instance, row } => {
+                    // A key reached the menu first in this batch: the
+                    // press was aimed at a menu the user had not seen.
+                    if self.task_list.menu_keyed {
+                        return Task::none();
+                    }
                     let chosen =
                         (self.task_list.menu.as_ref()).and_then(|menu| menu.choose(instance, row));
                     match chosen {

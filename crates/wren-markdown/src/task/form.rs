@@ -196,6 +196,20 @@ impl Form {
         Self::read(kind, k, expect.to_owned(), base, task, today)
     }
 
+    /// The form for the task `task` of `text`, line `line` of a note, as the
+    /// note reads it: a task whose line read alone may be none (nested in a
+    /// quote or a list). The form edits it, and expects `text` there.
+    pub fn edit_task(line: usize, text: &str, task: block::Task, today: Date) -> Option<Self> {
+        Self::read(
+            FormKind::Edit,
+            line,
+            text.to_owned(),
+            text.to_owned(),
+            task,
+            today,
+        )
+    }
+
     fn read(
         kind: FormKind,
         line: usize,

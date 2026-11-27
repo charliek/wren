@@ -18,6 +18,10 @@
 //!   choice (`App::take_escape_claim`'s precedence).
 //! - A press outside the card closes the menu and is dropped: the layer
 //!   under the card takes it, so nothing beneath hears it.
+//! - A press on a row chooses it as it comes, not at its release; the host
+//!   refuses a press that follows a key the menu took in the same batch
+//!   (discovery/tasks.md §6.2). Every press and release over the card is
+//!   the card's.
 
 use iced::keyboard::key::{Named, Physical};
 use iced::keyboard::{Key, Modifiers};
@@ -131,6 +135,13 @@ impl<T> HostMenu<T> {
 
     pub fn instance(&self) -> u64 {
         self.instance
+    }
+
+    /// Select the row `id`, when it can be chosen.
+    pub fn select_id(&mut self, id: u32) {
+        if let Some(at) = (self.rows.iter()).position(|row| row.id == id && row.enabled) {
+            self.selected = Some(at);
+        }
     }
 
     #[cfg_attr(not(feature = "smoke-test"), allow(dead_code))]
@@ -332,7 +343,15 @@ impl<T> HostMenu<T> {
                 instance,
                 row: entry.id,
             });
-            let line = button(container(line).height(ROW_HEIGHT).center_y(ROW_HEIGHT))
+            // A row is chosen as the press comes, in its batch's order (the
+            // app refuses a press after a key reached the menu in that batch,
+            // discovery/tasks.md §6.2): the area takes the press before the
+            // button, which only draws the row, can.
+            let mut area = mouse_area(container(line).height(ROW_HEIGHT).center_y(ROW_HEIGHT));
+            if enabled {
+                area = area.on_press(choose.clone());
+            }
+            let line = button(area)
                 .padding(0)
                 .width(Fill)
                 .on_press_maybe(enabled.then_some(choose))

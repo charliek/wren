@@ -2282,12 +2282,16 @@ mod tests {
 
         let (directory, mut app) = fixture();
         // Only over the task view.
-        assert!(app.open_row_calendar(row(&app, "B", 2), cell()).is_none());
+        assert!(app
+            .open_row_calendar(row(&app, "B", 2), 2, cell())
+            .is_none());
         show(&mut app);
 
         // A note that is not open, with no due date: today, hung under the
         // cell; a pick writes it to the file.
-        assert!(app.open_row_calendar(row(&app, "B", 2), cell()).is_some());
+        assert!(app
+            .open_row_calendar(row(&app, "B", 2), 2, cell())
+            .is_some());
         let open = app.calendar.as_ref().expect("open");
         assert_eq!((open.line(), open.has_due()), (2, false));
         assert_eq!(open.model.selected(), Date::new(2026, 11, 19).unwrap());
@@ -2304,7 +2308,9 @@ mod tests {
 
         // The open note: on its due date, cleared through its editor, and
         // undone through the same path.
-        assert!(app.open_row_calendar(row(&app, "A", 2), cell()).is_some());
+        assert!(app
+            .open_row_calendar(row(&app, "A", 2), 2, cell())
+            .is_some());
         let open = app.calendar.as_ref().expect("open");
         assert!(open.has_due());
         assert_eq!(open.model.current(), Some(Date::new(2026, 12, 1).unwrap()));
@@ -2314,7 +2320,9 @@ mod tests {
         assert_eq!(draft(&app), A);
 
         // Escape writes nothing.
-        assert!(app.open_row_calendar(row(&app, "A", 2), cell()).is_some());
+        assert!(app
+            .open_row_calendar(row(&app, "A", 2), 2, cell())
+            .is_some());
         let _ = app.update(Message::Calendar(Event::Field(
             crate::date_field::FieldEvent::Escape,
         )));
@@ -2325,7 +2333,7 @@ mod tests {
         let target = row(&app, "B", 2);
         let theirs = B.replace(LUNCH, "- [ ] Order dinner");
         std::fs::write(file(&directory, "B"), &theirs).unwrap();
-        assert!(app.open_row_calendar(target, cell()).is_some());
+        assert!(app.open_row_calendar(target, 2, cell()).is_some());
         let _ = app.update(Message::Calendar(Event::Pick(monday)));
         assert!(app.calendar.is_none());
         assert_eq!(on_disk(&directory, "B"), theirs);
@@ -2333,7 +2341,9 @@ mod tests {
         assert_eq!(said.as_deref(), Some(task_write::CHANGED));
 
         // The palette taking the keyboard closes it, writing nothing.
-        assert!(app.open_row_calendar(row(&app, "A", 2), cell()).is_some());
+        assert!(app
+            .open_row_calendar(row(&app, "A", 2), 2, cell())
+            .is_some());
         let _ = app.update(Message::Command(Command::Run(CommandId::CommandPalette)));
         assert!(app.calendar.is_none());
         assert_eq!(draft(&app), A);
@@ -2346,12 +2356,12 @@ mod tests {
         const NESTED: &str = "# B\n\n- [ ] Order lunch\n    - [ ] Call the caterer\n";
         let (directory, mut app) = fixture_with(ON, A, NESTED);
         // Only over the task view.
-        assert!(app.open_row_task_form(row(&app, "B", 3)).is_none());
+        assert!(app.open_row_task_form(row(&app, "B", 3), 6).is_none());
         show(&mut app);
 
         // A nested task of a note that is not open: read from its line,
         // written in place.
-        assert!(app.open_row_task_form(row(&app, "B", 3)).is_some());
+        assert!(app.open_row_task_form(row(&app, "B", 3), 6).is_some());
         let open = app.task_form.as_ref().expect("open");
         assert_eq!(open.form.description(), "Call the caterer");
         let _ = app.update(Message::TaskForm(Event::Description(
@@ -2366,7 +2376,7 @@ mod tests {
         );
 
         // The open note, through its editor.
-        assert!(app.open_row_task_form(row(&app, "A", 3)).is_some());
+        assert!(app.open_row_task_form(row(&app, "A", 3), 2).is_some());
         let _ = app.update(Message::TaskForm(Event::Priority(Some(Priority::High))));
         let _ = app.update(Message::TaskForm(Event::Save));
         assert!(app.task_form.is_none());
@@ -2383,7 +2393,7 @@ mod tests {
         let target = row(&app, "B", 2);
         let theirs = on_disk(&directory, "B").replace("Order lunch", "Order dinner");
         std::fs::write(file(&directory, "B"), &theirs).unwrap();
-        assert!(app.open_row_task_form(target).is_some());
+        assert!(app.open_row_task_form(target, 2).is_some());
         let _ = app.update(Message::TaskForm(Event::Description("Order tea".into())));
         let _ = app.update(Message::TaskForm(Event::Save));
         let open = app.task_form.as_ref().expect("still open");

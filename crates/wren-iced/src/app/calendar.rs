@@ -486,17 +486,19 @@ impl App {
 
     /// Open the calendar for the task of a row of the task view, on its
     /// due date or today, hung under `at` (the row's due cell), and give
-    /// its field the keyboard. `None` with no task view showing, or where
-    /// the row's line reads as no task.
+    /// its field the keyboard. The task's box is at byte `boxed` of its
+    /// line, as the task index found it. `None` with no task view showing,
+    /// or where there is no task there.
     pub(super) fn open_row_calendar(
         &mut self,
         target: RowTarget,
+        boxed: usize,
         at: Rectangle,
     ) -> Option<Task<Message>> {
         if !self.preferences.tasks || self.task_form.is_some() || self.surface() != Surface::Tasks {
             return None;
         }
-        let due = super::task_menus::row_task(&target.expect)?
+        let due = super::task_menus::row_task(&target.expect, boxed)?
             .due()
             .map(|token| token.value);
         let current = match due {
@@ -662,7 +664,7 @@ impl App {
             } => self.write_editor_due(line, &text, erase, due, focus),
             Target::Row(target, _) => {
                 let what = super::task_rows::What::Due(due);
-                let written = self.write_view_row(&target, Change::SetDue(due), what);
+                let written = self.write_view_row(&target, None, Change::SetDue(due), what);
                 Task::batch([focus, written.gateway.task])
             }
         }

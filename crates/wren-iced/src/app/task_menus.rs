@@ -255,14 +255,21 @@ fn task_of(spans: &LineSpans) -> Option<block::Task> {
     })
 }
 
-/// The task a row of the task view lists, read from its line alone: what
-/// its menus check and what the calendar opens on. A nested task's line,
-/// read alone, would be indented code, so what indents it is left out;
-/// the ranges the answer gives are of the line without it.
-pub(super) fn row_task(line: &str) -> Option<TaskLine<'_>> {
-    let line = line.trim_start();
-    let task = Scanner::new(Boxes::Status).next_line(line).item?.task?;
-    task::parse(line, task)
+/// The task a row of the task view lists: its line `source`, its box's `[`
+/// at byte `at` as the task index found it in the note. The line read alone
+/// may be no task (one nested in a quote or a list reads as indented code
+/// by itself), so the box is taken where the note has it.
+pub(super) fn row_task(source: &str, at: usize) -> Option<TaskLine<'_>> {
+    let mut chars = source.get(at..)?.chars();
+    let symbol = chars.next().filter(|open| *open == '[').and(chars.next())?;
+    chars.next().filter(|close| *close == ']')?;
+    let task = block::Task {
+        start: at,
+        end: at + 2 + symbol.len_utf8(),
+        symbol,
+        status: status::status(symbol).kind,
+    };
+    task::parse(source, task)
 }
 
 /// The menus' rows, for right-clicks and requests alike. It holds nothing:
@@ -922,13 +929,15 @@ mod tests {
     }
 
     #[test]
-    fn a_rows_line_reads_alone_nested_or_not() {
-        for line in [
-            "- [/] Call 🔽 📅 2026-12-01",
-            "    - [/] Call 🔽 📅 2026-12-01",
-            "\t1. [/] Call 🔽 📅 2026-12-01",
+    fn a_rows_task_is_read_at_its_box_nested_or_not() {
+        for (line, at) in [
+            ("- [/] Call 🔽 📅 2026-12-01", 2),
+            ("    - [/] Call 🔽 📅 2026-12-01", 6),
+            ("\t1. [/] Call 🔽 📅 2026-12-01", 4),
+            // Read alone, indented code: the note's list makes it a task.
+            (">     - [/] Call 🔽 📅 2026-12-01", 8),
         ] {
-            let task = row_task(line).unwrap_or_else(|| panic!("{line:?}"));
+            let task = row_task(line, at).unwrap_or_else(|| panic!("{line:?}"));
             assert_eq!(task.task().symbol, '/', "{line:?}");
             assert_eq!(
                 task.priority().map(|token| token.level),
@@ -936,8 +945,9 @@ mod tests {
             );
             assert!(task.due().is_some(), "{line:?}");
         }
-        assert!(row_task("plain text").is_none());
-        assert!(row_task("- not a task").is_none());
+        assert!(row_task("plain text", 0).is_none());
+        assert!(row_task("- [x] done", 0).is_none(), "no box there");
+        assert!(row_task("- [x", 2).is_none());
     }
 
     #[test]

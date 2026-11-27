@@ -1131,6 +1131,14 @@ impl App {
         if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape)) && self.take_escape_claim() {
             return Task::none();
         }
+        // A shortcut the task view dropped with the rest of a batch a key
+        // of its stopped, or ran itself: each copy is matched to its own
+        // report, before anything that opened in the batch can read it.
+        if let Input::Accel(accel) = &input {
+            if self.take_task_list_copy(&super::task_list_view::AppCopy::Shortcut(accel.clone())) {
+                return Task::none();
+            }
+        }
         // The task form owns the keyboard: its own keys took what it gives
         // a meaning, Escape and its save keys included (`form_keys.rs`), so
         // they are taken only once the form is shown, never while an input
@@ -1218,15 +1226,6 @@ impl App {
                     Nav::Escape | Nav::FieldEscape => Task::none(),
                 };
             }
-            // A shortcut the task view dropped with the rest of a batch a
-            // key of its stopped: each copy is matched to its own report.
-            Input::Accel(accel)
-                if self.take_task_list_copy(&super::task_list_view::AppCopy::Shortcut(
-                    accel.clone(),
-                )) =>
-            {
-                return Task::none()
-            }
             Input::Accel(accel) => accel,
         };
         // The sheet's own key is its filter's to close it with
@@ -1240,11 +1239,6 @@ impl App {
         else {
             return Task::none();
         };
-        // The task view's own Space-like toggle and its undo, on the keys
-        // the editor's commands have (`task_rows.rs`).
-        if let Some(task) = self.task_view_shortcut(id) {
-            return task;
-        }
         // The focused editor's key policy runs these; the same press
         // reaches here too, and must not act twice or outside the editor.
         if id.scope() == Scope::Editor {

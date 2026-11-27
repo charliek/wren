@@ -351,12 +351,20 @@ impl App {
         let Some(hidden) = self.note_tasks_hidden(note) else {
             return self.blocked("Only a Markdown note's tasks can be hidden");
         };
+        let gateway = self.hide_note_tasks(note, !hidden);
+        self.close_palette_after(gateway)
+    }
+
+    /// Hide the tasks in `note` (`hide`), or show them again, saying so in
+    /// a message whose Undo puts the front matter back.
+    pub(super) fn hide_note_tasks(&mut self, note: NoteId, hide: bool) -> Gateway {
+        let hidden = !hide;
         let title = self
             .model()
             .and_then(|model| model.note(note))
             .map(|note| note.title.clone())
             .unwrap_or_default();
-        let written = self.set_note_tasks_hidden(note, !hidden);
+        let written = self.set_note_tasks_hidden(note, hide);
         if let Ok(write) = &written.result {
             if write.changed {
                 let parts = if hidden {
@@ -379,7 +387,7 @@ impl App {
                 });
             }
         }
-        self.close_palette_after(written.gateway)
+        written.gateway
     }
 }
 
