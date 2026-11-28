@@ -10,8 +10,8 @@ docs = [
     "stridelabs-docs-theme",
 ]
 test = [
-    "pytest==9.0.3",
-    "pytest-timeout==2.3.1",
+    "pytest==9.2.0",
+    "pytest-timeout==2.4.0",
 ]
 
 # The shared StrideLabs docs theme, installed from its public repo; uv.lock
