@@ -2,6 +2,8 @@
 
 Status: **planned; nothing built.** Written 2026-11-24 against `main` at `f42bf57`, from the design in `discovery/tasks.md` (§2 items 1 to 29 are the owner's decisions; §6.1 the primitives), and revised the same day after a planning review by three reviewers (Codex `gpt-6.2-astra`, CodeRabbit, Gemini Neon). This is the contract for two long autonomous runs: **Run A** builds ring 0 (the editor) and **Run B** ring 1 (the summary view). Kanban (ring 2) is planned separately after Run B.
 
+Updated 2026-11-28: Runs A and B are built and released (v0.3.0). **Run C** builds ring 2, the board; its plan is §11, from the owner's decisions in `discovery/tasks.md` §2 items 30 to 37 and §11.
+
 How to use this document:
 - A fresh session reads `CLAUDE.md`, `discovery/tasks.md` and this file, then the work item it is on. The design note decides *what*; this file decides *in what order, tested how, by which model, and when an item is done*. `.claude/tasks-notes/HANDOFF.md` (git-ignored) says how to run the loop.
 - Line references come from a code survey and the planning review on 2026-11-24. They drift as work lands; find the named function.
@@ -10,7 +12,7 @@ How to use this document:
 
 ## 1. Rules that hold for every item
 
-- **Branch.** Run A works on the branch `tasks-ring0` in the worktree `.claude/worktrees/tasks-ring0`; Run B on `tasks-ring1` in `.claude/worktrees/tasks-ring1`. Tags are `tasks-r0` and `tasks-r1` (different names from the branches). Small verified commits; every commit passes `make check`. All commands for an item run with the worktree as the working directory.
+- **Branch.** Run A works on the branch `tasks-ring0` in the worktree `.claude/worktrees/tasks-ring0`; Run B on `tasks-ring1` in `.claude/worktrees/tasks-ring1`; Run C on `tasks-ring2` in `.claude/worktrees/tasks-ring2`. Tags are `tasks-r0`, `tasks-r1` and `tasks-r2` (different names from the branches). Small verified commits; every commit passes `make check`. All commands for an item run with the worktree as the working directory.
 - **Merge.** One pull request per run. The pull request is the third-party build: watched with `/git-commands:watch-pr`, then merged by the run with `/git-commands:merge-pr` as a **merge commit** (not a squash, as PRs #6, #8 and #9) once the run-end checklist (§8) passes on the pull request's final head. The tag goes on the merge commit.
 - **The `tasks` gate.** A `tasks` setting, off by default, **restart-only** like `boards` (the macOS menu bar is built once at launch, so a live gate could not reach it). With it off, Wren behaves exactly as today, which includes the shared classifier and editing rules:
   - the box accepts only ` `, `x` and `X`; `[/]`, `[-]` and other characters are not tasks;
@@ -54,6 +56,7 @@ How to use this document:
 
 Run A: 0.1 → 0.2 → 0.3 → 1.1 → 1.2 → 1.3 → 1.4 → 2.1 → 2.2 → 2.3 → 3.1 → 3.2 → 3.3 → 3.4 → 4.1 → 5.1 → 6.1 → 7.1 → 7.2 → 7.3.
 Run B: 8.1 → 9.1 → 10.1 → 10.2 → 10.3 → 10.4 → 10.5 → 11.1 → 11.2.
+Run C (§11): 12.1 → 12.2 → 12.3 → 12.4 → 13.1 → 13.2.
 
 ## 4. Run A: ring 0, the editor
 
@@ -160,9 +163,9 @@ Starts after the owner's hands-on pass with ring 0 (their notes go in the Run B 
 
 | Tier | Items | Codex reviewer |
 |---|---|---|
-| Fable | 1.1, 1.3, 2.1, 3.1, 3.2, 8.1, 9.1, 10.1; the ring judge (7.3, 11.2) | `gpt-6.2-astra`, `--cap-min 25` |
-| Opus | 0.1, 0.3, 1.2, 1.4, 2.2, 2.3, 3.3, 3.4, 4.1, 5.1, 6.1, 10.2 to 10.5 | `gpt-6.2-sol`; 4.1 gets `gpt-6.2-astra` |
-| Sonnet | 0.2, 7.1, 7.2, 11.1 | `gpt-6.2-sol` |
+| Fable | 1.1, 1.3, 2.1, 3.1, 3.2, 8.1, 9.1, 10.1, 12.2, 12.4; the ring judge (7.3, 11.2, 13.2) | `gpt-6.2-astra`, `--cap-min 25` |
+| Opus | 0.1, 0.3, 1.2, 1.4, 2.2, 2.3, 3.3, 3.4, 4.1, 5.1, 6.1, 10.2 to 10.5, 12.1, 12.3 | `gpt-6.2-sol`; 4.1 gets `gpt-6.2-astra` |
+| Sonnet | 0.2, 7.1, 7.2, 11.1, 13.1 | `gpt-6.2-sol` |
 
 This table is the only routing rule. The orchestrator is the main session on Opus. A Fable item that falls back to Opus (quota) keeps its astra review.
 
@@ -174,14 +177,14 @@ This table is the only routing rule. The orchestrator is the main session on Opu
 - **Functional:** `tools/wrentest/test_tasks_*.py` through the `tasks.*` requests. Each test sets its own settings (`tasks = on` and the engine it needs) and asserts the effective settings; negative cases run with `tasks = off` and on classic.
 - **Native input:** X11 cases (the `native_x11` marker) for box clicks, right-clicks on tokens and real ⌘/Ctrl/Alt chords. macOS: Metal scenes over ssh for every UI milestone; native macOS input (Command keys, dead keys, the emoji picker) needs the owner at the console, so it is listed in the run report as a hands-on check.
 - **The matrix**, every local smoke run: `WRENTEST_ENGINE=classic,advanced`, and at milestone ends all four lanes, `ICED_BACKEND=wgpu make smoke-x11`, `ICED_BACKEND=tiny-skia make smoke-x11`, `ICED_BACKEND=wgpu make smoke-wayland`, `ICED_BACKEND=tiny-skia make smoke-wayland`, each with `WRENTEST_TASKS=off` and `on`. Record test counts and skips per lane, so a lane that ran no task cases cannot pass silently. Check the branch's CI after each milestone push.
-- **Scenes,** captured by the item that adds the state, in `wren-light`, `wren-dark` and `solarized-light`, advanced engine unless the scene is about classic, pinned date: task lines (overdue, done, cancelled, doing, unknown box), the status-bar line (normal and narrow), status, priority and task menus, the calendar (empty, typed, invalid), suggestions (dates, priority, owners), the form (new, edit); in Run B the view (all, narrowed, grouped by due and by owner, empty), counts on and off, the scope menu, the undo message, a hidden note's mark.
+- **Scenes,** captured by the item that adds the state, in `wren-light`, `wren-dark` and `solarized-light`, advanced engine unless the scene is about classic, pinned date: task lines (overdue, done, cancelled, doing, unknown box), the status-bar line (normal and narrow), status, priority and task menus, the calendar (empty, typed, invalid), suggestions (dates, priority, owners), the form (new, edit); in Run B the view (all, narrowed, grouped by due and by owner, empty), counts on and off, the scope menu, the undo message, a hidden note's mark; in Run C the board (all four columns, a selected card, overdue and finished cards, an empty column, filtered by owner), the List | Board control in both states, a narrow window scrolled sideways, a drag in progress over its target column, and the message after a move.
 - **Gates:** `make check` per commit; `zensical build --strict` when `docs/` changes; the macOS clippy line after touching `keybind.rs`, `commands.rs`, `preferences.rs`, `menu.rs` or `macos_menu.rs`. Never run a plain `cargo build` while a smoke suite runs.
 
 ## 8. Run-end checklist
 
 Before merging, on the pull request's final head:
 1. Every item's RUNLOG entry is complete.
-2. A table in the RUNLOG maps each decision in `discovery/tasks.md` §2 (items 11 to 29 for the ring's scope) and each bullet of §12 for the ring to the unit, functional, native and scene evidence for it.
+2. A table in the RUNLOG maps each decision in `discovery/tasks.md` §2 (items 11 to 29 for the ring's scope; for Run C, items 34 to 37 and each bullet of §11) and each bullet of §12 for the ring to the unit, functional, native and scene evidence for it.
 3. The §7 matrix passed locally, and CI's `ci-success` is green on the final head; after any fix from the ring review or the pull request's bots, the affected gates were re-run on that head.
 4. The Mac checks passed, or are listed as pending with the owner told (a pending Mac check blocks the merge).
 5. The baseline fixture passes with `tasks = off`.
@@ -197,7 +200,7 @@ The run continues on its own except when:
 5. an item fails two fix rounds;
 6. a change would touch `vendor/`, the board format's `golden/` files, `.wren/workspace.toml`'s v1 keys, or the board file format;
 7. no usable review can be had for an item (runner and fallback both failed);
-8. a Mac check is still pending when the run reaches its merge, or the Mac's `~/projects/wren` is not on the external drive when a Mac check is needed (HANDOFF);
+8. a Mac check is still pending when the run reaches its merge, or the Mac's `~/projects/wren` is not on the external drive when a Mac check is needed (HANDOFF). For Run C the owner allows building in `~/wren` on the Mac's internal disk while the external drive is unmounted, deleted at the end of the run; `~/projects` is never recreated;
 9. the disk has less than 20 GB free;
 10. the end of each run.
 
@@ -311,3 +314,25 @@ Each entry: date, item, what changed and why, and whether the owner has seen it.
   - For later rings: the view's input code pairs a widget's report with the app's later copy of the same key by arrival order (the list's copy queue, the field's, the menu's); a later ring that adds a board view should first make the list run every shortcut in place and always drop the copy, as the description field does, and split task_list_view.rs.
 - 2026-11-27, CodeRabbit's review of PR #13, fixes that change recorded behaviour: a task-settings save that failed after a rename published is retried by the next flush, and by leaving the workspace (a warning if it still fails then); a published save whose durability is unconfirmed is said to be published, not unsaved, and its directory's sync is retried as best effort that never blocks a flush or a switch (leaving warns). Hide is refused when the front matter's top level is indented, and Hide and Show when the `tasks` line goes on in indented lines (a multi-line value). A last `tasks` or `TP_ignore_this_file` line whose value Wren does not read (its quotes) hides nothing, as the last occurrence decides. In the view: the description field never follows its task to a twin that was listed before, and ends when a rebuild moves it out of the rows built; a held undo chord, `+` or `-` acts once; the task menu's "Open the note at this line" opens the menu's own task by the writer's rule; an undo leaves a selection on another task where it is; a selected row in sight stays in sight when a filter, the grouping or R moves it (a rescan keeps the list's offset, clamped); the text size commands zoom a board only while it shows; a task write is never reported as a read-only metadata change. Headings' titles are shared by the records under them.
 - 2026-11-27, after ring 1, the owner's header review: **Toggle task counts** gets a default key, Mod+Shift+H (⇧⌘H; Ctrl+Shift+H or Alt+Shift+H on Linux), free in every layer and mode like Show tasks' Mod+Shift+T. Mod+Shift+C, the first pick, was dropped after the review: text fields and the editor copy on Mod+C with Shift held, so Ctrl+Shift+C (a terminal's copy) and ⇧⌘C copy today, and the owner chose H over taking that. Mod+Opt+T was ruled out because GNOME takes Ctrl+Alt+T for a terminal. The header count's face is centred in its 22 px chip (a button puts its content at its top, so it sat about 4 px above the title's line), and its number takes the title's rounded line height, so the two share a line to the pixel (measured on macOS Metal and X11 at 1×). A column's title ends in "…" when the column is too narrow, so the count and the + stay whole; the name after the column word goes first, which the column to the left shows selected anyway.
+- 2026-11-28, after ring 1 shipped (v0.3.0), the owner's answers on what ring 1 left open and on ring 2: no saved views; no section hide until missed; the note-set scope deferred; the suggestions' Enter rule kept for now; coloured text kept over chips; ring 2 is the status board with all four columns always shown, mouse drag as well as ⇧←/⇧→, List or Board remembered per scope with `B` and a palette command, and a narrow board scrolling sideways. Recorded in `discovery/tasks.md` §2 items 30 to 37 and §11. Before Run C, the view's input was changed to run every shortcut in place and always drop the app's copy, and `task_list_view.rs` was split (the known limit recorded on 2026-11-27).
+
+## 11. Run C: ring 2, the board
+
+Starts from `main` with ring 1 (`tasks-r1`, v0.3.0) and the view cleanup merged. The design is `discovery/tasks.md` §11 and §2 items 34 to 37; the prototype's Ring 2 board (`.claude/artifacts-backup/wren-tasks/index.html`, git-ignored) is the visual reference, except that Cancelled is a column there too and its manual order (`🆔`, ⌥↑/⌥↓) is not built. §1 and §6 to §9 apply. The board is drawn by the view, not the editor, so it works on both editor engines.
+
+### M12. The board
+
+- **12.1 The layout switch** (Opus; sol). `Layout { List, Board }` kept per scope in `.wren/tasks.toml` beside its filters, written only for Board and read leniently (an unknown value is List); the List | Board control in the view's controls bar; `B` in the view; the App command `tasks.toggle_board` ("Toggle task board": palette, and the macOS View menu beside Toggle task counts; no default key); the status chips and Group by hidden while the board shows; switching is not a history stop; with `tasks = off` none of it exists. The board's content is 12.2; here it may show its four columns empty.
+  - **Acceptance:** the choice survives a restart per scope, and `.wren/tasks.toml` is unchanged while every scope is List; the button, `B` and the palette each switch, with Back and Forward unaffected; the controls each layout shows; the palette and menu invariants (`menu.rs`, `commands.rs`); tasks off: no command, no key, no file.
+- **12.2 Columns and cards** (Fable; astra). A board projection of ring 1's listing in `task_list.rs` (four columns, the list's filters and order, an unknown box as open, Hide done applied to Done and Cancelled, held cards until R), and the board layout beside the list's in the view's modules: card drawing per §11, a count in each column's head, each column scrolling on its own, a minimum column width with the board scrolling sideways, empty columns, the selected card's ring, and the selected card kept in sight through refreshes.
+  - **Acceptance:** Rust tests of the projection (columns, order, unknown box, hold until R, Hide done in Done and Cancelled, the owner, due and priority filters, a multi-owner task once); `perf_task_list_view`'s workload timed for the board within the list's budget; scenes in three themes.
+- **12.3 Keys** (Opus; sol). Selection across columns (← and → to the nearest card by position, ↑ and ↓ within one), ⇧← and ⇧→ moving the card one column (one line edit; the stamps follow), and the list's keys (Space, ⌘↵, S, P, D, E, `+`, `-`, F2, Enter, R, `B`, Tab through the controls), through the view's one rule for the app's copies of keys.
+  - **Acceptance:** each key, and each write's undo; a move past the last or first column does nothing; a stale card's move refused with the list's message; held keys never repeat a write; native X11 cases for ⇧→ and the Mod chords.
+- **12.4 Mouse and drag** (Fable; astra). A click selects; on the priority or the date it opens that menu or the calendar; a right-click opens the task menu; a double-click on the description edits it. A press that moves past a threshold starts a drag (precedent `drag.rs` and `drag_view.rs`): the card follows the pointer as a ghost, the column under it is highlighted, and the board scrolls sideways near its edges. A drop on another column writes the status; a drop in its own column or outside the board, Escape, or the window losing the pointer cancels; a rebuild during a drag (the watcher) ends it cleanly or keeps it on its task.
+  - **Acceptance:** Rust tests of the drag machine (threshold, target, cancels, a rebuild during a drag); functional tests through a `tasks.*` request; a native X11 drag (press, move, release with xdotool) on both renderers; scenes of a drag in progress.
+
+### M13. Ring 2 finish
+
+- **13.1 Docs and scenes** (Sonnet; sol): `docs/reference/tasks.md` (the board), `docs/getting-started/keybindings.md` (`B`, ⇧← and ⇧→, Toggle task board), `docs/reference/workspace-folder.md` (the layout in `.wren/tasks.toml`), the changelog under Unreleased; every Run C scene, on Linux and on the Mac.
+- **13.2 Ring review and merge** (Fable judge; Codex `gpt-6.2-astra` on the branch since its merge base), the §8 checklist, pull request, merge, tag `tasks-r2`. Stop and report. The release (v0.4.0) is the owner's call after a hands-on pass.
+
