@@ -11,6 +11,8 @@ macOS DMG and the Linux `.deb`s, publishes the GitHub Release with this
 version's section as its notes, and publishes to the apt repo. See
 [RELEASING.md](RELEASING.md).
 
+## [Unreleased]
+
 ## v0.3.0 — 2026-11-27
 
 ### Added
