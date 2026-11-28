@@ -64,7 +64,9 @@ def test_with_the_setting_off_a_board_is_not_there(small: Path) -> None:
         assert [row["path"] for row in session["notes"]] == ["Plans/Q1/Note.md"]
         assert session["banner"] is None
         assert board(app)["enabled"] is False
-        titles = palette_titles(app, "board")
+        # The task view's "Toggle task board" (tasks setting, ring 2) is no
+        # board note's command, so it is not gated by `boards`.
+        titles = [t for t in palette_titles(app, "board") if t != "Toggle task board"]
         assert not any("board" in title.lower() for title in titles), titles
         app.client.call("palette.open", {"mode": "search"})
         modal = app.client.call("palette.query", {"query": "Gate"})["navigation"]["modal"]
