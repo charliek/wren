@@ -11,7 +11,7 @@ macOS DMG and the Linux `.deb`s, publishes the GitHub Release with this
 version's section as its notes, and publishes to the apt repo. See
 [RELEASING.md](RELEASING.md).
 
-## [Unreleased]
+## v0.3.0 — 2026-11-27
 
 ### Added
 
@@ -50,6 +50,9 @@ version's section as its notes, and publishes to the apt repo. See
   show no content in search until the next poll, about a second.
 - A write to a closed note that finds bytes that are not text now refuses, and
   drops the note's old tasks and search text until it reads again.
+- An Escape typed quickly after opening the calendar, a task menu or the task
+  form (with ⌘D, a right-click on a due date, or the form's calendar button)
+  no longer closes what just opened.
 
 ## v0.2.2 — 2026-11-26
 
