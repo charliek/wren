@@ -34,7 +34,9 @@ Color Emoji.
 sam.lee`) on the advanced engine with `tasks = on` and the same pinned day,
 and shoots the view of the workspace's tasks: all of them, narrowed by a
 status chip, grouped by due date and by owner, an empty list with its hint,
-and the scope menu open; then a row's writes (item 10.4): its status,
+and the scope menu open; then the List | Board switch (item 12.1) with the
+keyboard on it, and the board's four columns, empty until item 12.2; then a
+row's writes (item 10.4): its status,
 priority and task menus, the calendar and the form over it, the message
 with Undo after a write, and a row held in place under the Open chip after
 it was marked done, and a row's description edited in place (item 10.5),
@@ -530,6 +532,31 @@ def task_list_scenes(client, shot_here) -> None:
     assert view()["list"]["menu"] is None
     assert view()["list"]["filters"] == {"statuses": [], "owner": "anyone", "group": "note",
                                           "hide_old": True, "due": None, "priority": None}
+
+
+def task_layout_scenes(client, shot_here) -> None:
+    """The List | Board switch in the view's header (discovery/tasks-build.md
+    item 12.1): the list with the keyboard on the switch (Tab from the scope
+    chip), then the board it flips to, its four columns empty until item
+    12.2 fills them. The list is put back, so `.wren/tasks.toml` ends with
+    no view."""
+    def view(**params):
+        return client.call("tasks.view", {**params, "list": True})["list"]
+
+    def press(key: str) -> dict:
+        return view(key={"key": key, "mods": []})
+
+    assert view()["layout"] == "list"
+    press("tab")
+    assert press("tab")["focus"] == "layout"
+    shot_here("task-layout-switch")
+    press("escape")
+    state = press("b")
+    assert state["layout"] == "board" and state["focus"] == "list", state
+    assert [column["label"] for column in state["board"]["columns"]] == [
+        "Open", "Doing", "Done", "Cancelled"]
+    shot_here("task-board-empty")
+    assert press("b")["layout"] == "list"
 
 
 def task_write_scenes(client, shot_here) -> None:
@@ -1834,6 +1861,7 @@ def main() -> int:
                     shot(app.client, name)
 
                 task_list_scenes(app.client, shot_list)
+                task_layout_scenes(app.client, shot_list)
                 task_write_scenes(app.client, shot_list)
             return 0
         if args.only == "spell":

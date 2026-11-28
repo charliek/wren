@@ -42,8 +42,17 @@
 //! - **Writes** (item 10.4, `task_rows.rs`): keys, clicks and menus on a
 //!   row change its task in its note, each with a message with Undo, and a
 //!   row written stays where it stood until R refreshes the list.
-//! - **Its parts:** what a layout of the view shares is apart from the
-//!   list layout's own (`list.rs`: its body, rows, selection and keys).
+//! - **Two layouts** (discovery/tasks.md §11; item 12.1): the list, and
+//!   the board of status columns. Which one shows is kept for each scope
+//!   beside its filters ([`TaskFilters::layout`]), switched by the List |
+//!   Board control in the header, `B` while the list or the board has the
+//!   keyboard, and the App command `tasks.toggle_board`. A switch is
+//!   written as a filter change is, and lets the held rows go; it is no
+//!   stop in Back and Forward. On the board the status chips, Show all and
+//!   Group by are hidden, and are no Tab stops.
+//! - **Its parts:** what a layout of the view shares is apart from each
+//!   layout's own (`list.rs`: the list's body, rows, selection and keys;
+//!   `board.rs`: the board's).
 //!   `build.rs` builds the listing, `controls.rs` is the bar of filters
 //!   and the menus it opens, `menu.rs` the menu over the view, `keys.rs`
 //!   and `clicks.rs` read the view's input, `copies.rs` holds the app's
@@ -51,7 +60,7 @@
 //!   `footer.rs` is the pane's footer under the view.
 
 use iced::Rectangle;
-use wren_core::tasks_file::TaskFilters;
+use wren_core::tasks_file::{Layout, TaskFilters};
 use wren_markdown::date::Date;
 
 use super::host_menu::HostMenu;
@@ -59,6 +68,7 @@ use super::task_list::{self, GroupKey, Listing, RowKey};
 use super::tasks_view::Scope;
 use crate::list_keys::Drawn;
 
+mod board;
 mod build;
 mod clicks;
 mod controls;
@@ -71,12 +81,12 @@ mod open;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(feature = "smoke-test")]
+pub(super) use board::COLUMNS as BOARD_COLUMNS;
 pub use clicks::Click;
 #[cfg(feature = "smoke-test")]
 pub(super) use controls::empty_hint;
 pub(super) use copies::{AppCopy, Copies};
-#[cfg(feature = "smoke-test")]
-pub(super) use footer::HINT;
 #[cfg(test)]
 pub(super) use list::box_face;
 #[cfg(feature = "smoke-test")]
@@ -96,6 +106,8 @@ const UNDRAWN_HEIGHT: f32 = 2000.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Scope,
+    /// The List | Board switch.
+    Layout,
     /// The status chip at this place in [`task_list::CHIPS`].
     Chip(usize),
     ShowAll,
@@ -144,6 +156,7 @@ impl Control {
     pub(super) fn name(self) -> String {
         match self {
             Self::Scope => "scope".into(),
+            Self::Layout => "layout".into(),
             Self::Chip(chip) => format!("chip:{}", task_list::CHIPS[chip].name()),
             Self::ShowAll => "show_all".into(),
             Self::Owner => "owner".into(),
@@ -243,6 +256,13 @@ pub(super) struct ListState {
 }
 
 impl ListState {
+    /// The layout the view shows: the one its listing was built for.
+    pub(super) fn layout(&self) -> Layout {
+        self.built
+            .as_ref()
+            .map_or(Layout::List, |built| built.filters.layout)
+    }
+
     /// Forget the list: another workspace is open. The serials and the
     /// menus' numbers go on, so nothing of the old list's is taken for
     /// the new one's.

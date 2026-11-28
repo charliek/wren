@@ -7,7 +7,7 @@ use iced::keyboard::Key;
 use iced::widget::{column, container, mouse_area, row, scrollable, svg, Space};
 use iced::{Element, Fill, Shrink, Task};
 use wren_core::tasks::TaskRecord;
-use wren_core::tasks_file::{GroupBy, TaskFilters};
+use wren_core::tasks_file::{GroupBy, Layout, TaskFilters};
 use wren_core::theme::Rgb;
 use wren_markdown::date::{Date, Parsed};
 use wren_markdown::status::StatusType;
@@ -260,7 +260,7 @@ impl App {
         (task, false)
     }
 
-    /// The view's body: its filters over its list.
+    /// The view's body: its filters over its list, or over its board.
     pub(in crate::app) fn task_list_body(&self) -> Element<'_, Message> {
         let colors = self.definition.colors;
         let list = &self.task_list;
@@ -274,7 +274,9 @@ impl App {
         let has_keys = self.task_view_has_keys();
         let definition = self.definition;
         let tools = self.task_list_controls(&filters, serial);
-        let body: Element<'_, Message> = if list.listing.entries.is_empty() {
+        let body: Element<'_, Message> = if filters.layout == Layout::Board {
+            self.board_body()
+        } else if list.listing.entries.is_empty() {
             let scope = self.task_view().cloned().unwrap_or(Scope::Workspace);
             container(
                 chrome::label(

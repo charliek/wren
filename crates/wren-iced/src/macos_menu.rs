@@ -19,7 +19,8 @@ use wren_core::keybind::Keymap;
 
 use crate::menu::{self, Kind, Native, Row, CHECK_FOR_UPDATES};
 
-/// An item of the Board menu, and whether it was last set enabled.
+/// An item that follows its command's enabled state (the Board menu's, and
+/// [`menu::FOLLOWING`]), and whether it was last set enabled.
 struct BoardItem {
     key: &'static str,
     item: MenuItem,
@@ -85,7 +86,7 @@ fn append(
                     .find_map(|accel| accel.to_string().parse::<Accelerator>().ok());
                 let item = MenuItem::with_id(key, title, true, accelerator);
                 submenu.append(&item)?;
-                if kind == Kind::Board {
+                if menu::follows_command(kind, key) {
                     built.board.push(BoardItem {
                         key,
                         item,
@@ -149,8 +150,8 @@ pub fn sync_updates() {
     });
 }
 
-/// Enable each Board menu item as `enabled` says of its command key,
-/// touching only the items that change.
+/// Enable each Board menu item, and each item of [`menu::FOLLOWING`], as
+/// `enabled` says of its command key, touching only the items that change.
 pub fn sync_board(mut enabled: impl FnMut(&str) -> bool) {
     BOARD.with(|slot| {
         for board in slot.borrow_mut().iter_mut() {
@@ -169,8 +170,9 @@ pub fn updates_enabled() -> Option<bool> {
     UPDATES.with(|slot| slot.borrow().as_ref().map(MenuItem::is_enabled))
 }
 
-/// Each Board menu item's key and whether the native item is enabled, in
-/// menu order; empty before the menu exists or with the setting off.
+/// Each item that follows its command (the Board menu's, then those of
+/// [`menu::FOLLOWING`], in menu order) and whether the native item is
+/// enabled; empty before the menu exists.
 #[cfg(feature = "smoke-test")]
 pub fn board_enabled() -> Vec<(&'static str, bool)> {
     BOARD.with(|slot| {

@@ -1,20 +1,24 @@
-//! The task view's controls: the scope chip, the status chips, Show all,
-//! the owner, grouping, due and priority pickers and Hide done, with the
-//! menus they open and what a choice there changes.
+//! The task view's controls: the scope chip, the List | Board switch, the
+//! status chips, Show all, the owner, grouping, due and priority pickers
+//! and Hide done, with the menus they open and what a choice there
+//! changes. On the board the status chips, Show all and Group by do not
+//! apply, and are not drawn.
 
 use iced::widget::{button, container, row};
 use iced::{Element, Fill, Shrink, Task};
 use wren_core::fs_store::RelPath;
 use wren_core::model::ItemRef;
 use wren_core::ops::Op;
-use wren_core::tasks_file::{DueBucket, GroupBy, OwnerFilter, PriorityFilter, TaskFilters};
+use wren_core::tasks_file::{DueBucket, GroupBy, Layout, OwnerFilter, PriorityFilter, TaskFilters};
 use wren_editor::{Accelerator, Row};
 use wren_markdown::status::StatusType;
 
 use super::clicks::Click;
+use super::keys::task_view_slots;
 use super::list::task_box;
 use super::menu::MenuFor;
-use super::Control;
+use super::{Control, LIST};
+use crate::app::commands::Gateway;
 use crate::app::task_list;
 use crate::app::tasks_view::{Event, Scope};
 use crate::app::{App, Message};
@@ -207,6 +211,9 @@ impl App {
                 self.change_filters(|filters| filters.hide_old = !filters.hide_old);
                 Task::none()
             }
+            Control::Layout => self
+                .change_layout(Layout::other)
+                .map_or_else(Task::none, |outcome| outcome.task),
             Control::Scope
             | Control::Owner
             | Control::GroupBy
@@ -219,27 +226,85 @@ impl App {
     }
 
     /// Change the view's filters with `change`, remembering them for its
-    /// scope when they differ.
-    pub(in crate::app) fn change_filters(&mut self, change: impl FnOnce(&mut TaskFilters)) {
-        let Some(scope) = self.task_view().cloned() else {
-            return;
-        };
-        let Ok(item) = self.scope_item(&scope) else {
-            return;
-        };
+    /// scope when they differ. Returns the write's outcome; `None` when
+    /// nothing changed, or with no view.
+    pub(in crate::app) fn change_filters(
+        &mut self,
+        change: impl FnOnce(&mut TaskFilters),
+    ) -> Option<Gateway> {
+        let scope = self.task_view().cloned()?;
+        let item = self.scope_item(&scope).ok()?;
         let mut filters = self.task_filters(&scope);
         let before = filters.clone();
         change(&mut filters);
-        if filters != before {
-            // The rows held move to where the new filters put them.
-            self.task_list.held.clear();
-            self.task_list.describe = None;
-            self.task_list.reveal = true;
-            let _ = self.process_core(Op::SetTaskFilters {
-                scope: item,
-                filters,
-            });
+        if filters == before {
+            return None;
         }
+        // The rows held move to where the new filters put them.
+        self.task_list.held.clear();
+        self.task_list.describe = None;
+        self.task_list.reveal = true;
+        Some(self.process_core(Op::SetTaskFilters {
+            scope: item,
+            filters,
+        }))
+    }
+
+    /// Show the view's layout `to` gives for the one it shows (item 12.1),
+    /// remembered for its scope as a filter change is, the held rows let
+    /// go. A switch closes the menu over the view, whose control or row the
+    /// other layout may not draw. No stop in Back and Forward. `None` with
+    /// no view, or when the layout stays.
+    pub(in crate::app) fn change_layout(
+        &mut self,
+        to: impl FnOnce(Layout) -> Layout,
+    ) -> Option<Gateway> {
+        let scope = self.task_view().cloned()?;
+        let before = self.task_filters(&scope).layout;
+        let mut outcome = self.change_filters(|filters| filters.layout = to(filters.layout))?;
+        let filters = self.task_filters(&scope);
+        if filters.layout == before {
+            // Refused: the file is read-only.
+            return Some(outcome);
+        }
+        self.task_list.menu = None;
+        // A control the layout now shown does not draw gives the keyboard
+        // back to the body.
+        if (self.task_list.focus)
+            .is_some_and(|focus| !task_view_slots(&filters).contains(&Some(focus)))
+        {
+            self.task_list.focus = None;
+        }
+        // The list's scroller was gone while the board showed, and comes
+        // back at its top: it goes back to where the list was.
+        if filters.layout == Layout::List {
+            let scroll = iced::widget::operation::scroll_to(
+                LIST,
+                iced::widget::operation::AbsoluteOffset {
+                    x: 0.0,
+                    y: self.task_list.scroll,
+                },
+            );
+            outcome.task =
+                Task::batch([std::mem::replace(&mut outcome.task, Task::none()), scroll]);
+        }
+        Some(outcome)
+    }
+
+    /// `tasks.toggle_board`: the view's other layout, as `B` and the
+    /// switch's Enter show it.
+    pub(in crate::app) fn toggle_task_board(&mut self) -> Gateway {
+        let palette = self.palette.take().is_some();
+        let Some(mut outcome) = self.change_layout(Layout::other) else {
+            return self.blocked("No task view is open");
+        };
+        if palette {
+            outcome.task = Task::batch([
+                std::mem::replace(&mut outcome.task, Task::none()),
+                self.column_focus(),
+            ]);
+        }
+        outcome
     }
 
     /// The scopes "Show tasks in" offers for the view of `scope`: the
@@ -470,8 +535,85 @@ impl App {
             .into()
     }
 
+    /// The List | Board switch in the view's header: two segments, the
+    /// layout shown pressed. A click on a segment shows its layout; with
+    /// the keyboard, Enter or Space flips it.
+    pub(in crate::app) fn task_layout_switch(&self) -> Element<'_, Message> {
+        let colors = self.definition.colors;
+        let definition = self.definition;
+        let list = &self.task_list;
+        let shown = list.layout();
+        let focused = list.focus == Some(Control::Layout) && self.task_view_has_keys();
+        let serial = list.serials.get();
+        // The box's 1 px edge and the line between the segments are its
+        // background showing round and between them.
+        let segment = |layout: Layout, label: &'static str, radius: iced::border::Radius| {
+            let on = layout == shown;
+            button(
+                chrome::label(label, 12, if on { colors.accent } else { colors.body })
+                    .font(if on { fonts::SEMIBOLD } else { fonts::UI }),
+            )
+            .padding([3, 9])
+            .on_press(Message::TaskView(Event::Click {
+                serial,
+                click: Click::Layout(layout),
+            }))
+            .style(move |_, status| {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: Some(
+                        theme::color(if on {
+                            colors.selected
+                        } else if hovered {
+                            colors.control
+                        } else {
+                            colors.raised
+                        })
+                        .into(),
+                    ),
+                    text_color: theme::color(if on { colors.accent } else { colors.body }),
+                    border: iced::Border {
+                        radius,
+                        ..iced::Border::default()
+                    },
+                    ..button::Style::default()
+                }
+            })
+        };
+        let switch = container(
+            row![
+                segment(Layout::List, "List", iced::border::radius(0).left(5)),
+                segment(Layout::Board, "Board", iced::border::radius(0).right(5)),
+            ]
+            .spacing(1),
+        )
+        .padding(1)
+        .style(move |_| container::Style {
+            background: Some(theme::color(colors.control_border).into()),
+            border: iced::Border {
+                radius: 6.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        });
+        // The keyboard's ring goes round the box, in room kept for it.
+        container(probe(switch, &list.drawn, Control::Layout))
+            .padding(2)
+            .id("task-view-layout")
+            .style(move |_| container::Style {
+                border: iced::Border {
+                    color: theme::color(definition.colors.accent),
+                    width: if focused { 2.0 } else { 0.0 },
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     /// The bar of the view's controls, in the batch `serial`: the status
-    /// chips, Show all, the pickers and Hide done.
+    /// chips and Show all (on the list only), the pickers (Group by on the
+    /// list only) and Hide done.
     pub(in crate::app) fn task_list_controls(
         &self,
         filters: &TaskFilters,
@@ -488,10 +630,21 @@ impl App {
                 click: Click::Control(control),
             })
         };
-        let mut tools = row![chrome::label("Status", 12, colors.muted)]
-            .spacing(6)
-            .align_y(iced::Center);
-        for (chip, status) in task_list::CHIPS.iter().enumerate() {
+        let board = filters.layout == Layout::Board;
+        if board {
+            // Not drawn: nothing may hang under them or be clicked there.
+            (list.drawn.borrow_mut()).retain(|(control, _)| {
+                !matches!(
+                    control,
+                    Control::Chip(_) | Control::ShowAll | Control::GroupBy
+                )
+            });
+        }
+        let mut tools = row![].spacing(6).align_y(iced::Center);
+        if !board {
+            tools = tools.push(chrome::label("Status", 12, colors.muted));
+        }
+        for (chip, status) in task_list::CHIPS.iter().enumerate().filter(|_| !board) {
             let on = filters.statuses.contains(status);
             let name = task_list::CHIPS[chip].name();
             let mut title: String = name[..1].to_uppercase();
@@ -514,7 +667,9 @@ impl App {
                 .style(move |_, status| chip_style(definition, status, on, is_focused));
             tools = tools.push(probe(chip_button, &list.drawn, Control::Chip(chip)));
         }
-        if filters.statuses.is_empty() {
+        if board {
+            // Neither the chips' word nor Show all.
+        } else if filters.statuses.is_empty() {
             tools = tools.push(chrome::label("All shown", 12, colors.faint));
         } else {
             let is_focused = focused(Control::ShowAll);
@@ -544,7 +699,10 @@ impl App {
             (Control::GroupBy, "Group by", group.to_owned()),
             (Control::Due, "Due", due.to_owned()),
             (Control::Priority, "Priority", priority),
-        ] {
+        ]
+        .into_iter()
+        .filter(|(control, ..)| !(board && *control == Control::GroupBy))
+        {
             let is_focused = focused(control);
             let open = list
                 .menu

@@ -144,6 +144,7 @@ pub const MENUS: [Menu; 5] = {
                 C("view.focus", "Toggle Focus Mode"),
                 C("view.collapse_columns", "Toggle Collapsed Columns"),
                 C("view.toggle_task_counts", "Toggle Task Counts"),
+                C("tasks.toggle_board", "Toggle Task Board"),
             ],
         },
         Menu {
@@ -195,6 +196,18 @@ pub const MENUS: [Menu; 5] = {
         },
     ]
 };
+
+/// Command items outside the Board menu that follow `command_enabled` as
+/// the Board menu's do: Toggle Task Board, which runs only while a task
+/// view shows (item 12.1).
+pub const FOLLOWING: [&str; 1] = ["tasks.toggle_board"];
+
+/// Whether the item for `key` in a menu of `kind` is enabled as its
+/// command would run, kept so after every message; the others are always
+/// enabled, and a command that cannot run says why.
+pub fn follows_command(kind: Kind, key: &str) -> bool {
+    kind == Kind::Board || FOLLOWING.contains(&key)
+}
 
 /// The menus built with the `boards` setting as given.
 pub fn menus(boards: bool) -> impl Iterator<Item = &'static Menu> {
@@ -332,8 +345,9 @@ mod tests {
         }
     }
 
-    /// Show tasks ends the Go menu's jumps and Toggle task counts the View
-    /// menu (item 10.2), App commands built only with tasks on; with tasks
+    /// Show tasks ends the Go menu's jumps and Toggle task counts and Toggle
+    /// task board the View menu (items 10.2, 12.1), App commands built only
+    /// with tasks on; with tasks
     /// off both menus are as they were, row for row, with no separator
     /// left doubled or trailing.
     #[test]
@@ -382,17 +396,30 @@ mod tests {
         assert_eq!(go[3..5], ["navigation.outline", "tasks.show"]);
         assert_eq!(go.len(), built("Go", false).len() + 1);
         let view = built("View", true);
+        // Toggle task board (item 12.1) follows Toggle task counts.
         assert_eq!(
-            view.last().map(String::as_str),
-            Some("view.toggle_task_counts")
+            view[view.len() - 2..],
+            ["view.toggle_task_counts", "tasks.toggle_board"]
         );
-        assert_eq!(view.len(), built("View", false).len() + 1);
-        for key in ["tasks.show", "view.toggle_task_counts"] {
+        assert_eq!(view.len(), built("View", false).len() + 2);
+        for key in [
+            "tasks.show",
+            "view.toggle_task_counts",
+            "tasks.toggle_board",
+        ] {
             let id = CommandId::parse(key).unwrap();
             assert!(id.tasks() && id.task_entry(), "{key}");
             assert_eq!(id.scope(), Scope::App, "{key}");
+            // Only Toggle task board's item follows its command: the
+            // others run wherever the keyboard is.
+            assert_eq!(
+                follows_command(Kind::Plain, key),
+                key == "tasks.toggle_board",
+                "{key}"
+            );
         }
-        // Each menu item a task command has is one of these two: the line
+        assert!(follows_command(Kind::Board, "board.duplicate"));
+        // Each menu item a task command has is one of these three: the line
         // commands are the editor's, and the hides act on a row.
         let tasks: Vec<_> = all_commands()
             .filter(|(_, key, _)| CommandId::parse(key).unwrap().tasks())
@@ -400,7 +427,11 @@ mod tests {
             .collect();
         assert_eq!(
             tasks,
-            [("Go", "tasks.show"), ("View", "view.toggle_task_counts")]
+            [
+                ("Go", "tasks.show"),
+                ("View", "view.toggle_task_counts"),
+                ("View", "tasks.toggle_board")
+            ]
         );
         // The Mac menu shows Show tasks' key, ⇧⌘T, and Toggle task counts',
         // ⇧⌘H, once tasks join the keymap.

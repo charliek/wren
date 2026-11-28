@@ -796,12 +796,13 @@ impl App {
     }
 
     /// The pane's header over a task view: Back and Forward, then the
-    /// scope chip, which opens "Show tasks in".
+    /// scope chip, which opens "Show tasks in", and at the right the List |
+    /// Board switch, which a narrow pane keeps whole: the chip gives way.
     pub(super) fn task_view_header(&self, scope: &Scope) -> Element<'_, Message> {
         row![
             self.history_buttons(),
-            self.task_scope_chip(scope),
-            iced::widget::space::horizontal()
+            iced::widget::container(self.task_scope_chip(scope)).width(iced::Fill),
+            self.task_layout_switch()
         ]
         .spacing(6)
         .align_y(iced::Center)

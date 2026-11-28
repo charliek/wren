@@ -268,8 +268,9 @@ def test_show_tasks_opens_where_the_keyboard_is(tmp_path: Path) -> None:
         menus = {menu["title"]: menu["items"] for menu in call("menu.get")["menus"]}
         go = [entry["key"] for entry in menus["Go"] if "key" in entry]
         assert go[go.index("navigation.outline") + 1] == "tasks.show"
-        assert [entry["key"] for entry in menus["View"] if "key" in entry][-1] == \
-            "view.toggle_task_counts"
+        # Toggle task board (item 12.1) follows Toggle task counts.
+        assert [entry["key"] for entry in menus["View"] if "key" in entry][-2:] == [
+            "view.toggle_task_counts", "tasks.toggle_board"]
 
 
 def test_a_groups_actions_show_and_hide_its_tasks_with_undo(tmp_path: Path) -> None:

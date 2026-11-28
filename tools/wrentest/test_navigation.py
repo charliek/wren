@@ -74,6 +74,9 @@ TASK_ENTRY_COMMANDS = {
     "group.hide_tasks": False,
     "note.hide_tasks": False,
 }
+# The task view's own App command (item 12.1), which exists only with tasks
+# on and is enabled only while a view shows: never in this catalog.
+TASK_VIEW_COMMANDS = {"tasks.toggle_board"}
 DEFAULT_WIDTHS = {"sections": 176, "groups": 192, "notes": 256}
 FIRST = "Atlas/Research/Note 1.md"
 SECOND = "Atlas/Research/Note 2.md"
@@ -292,7 +295,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         if os.environ.get("WRENTEST_TASKS"):
             assert tasks is (os.environ["WRENTEST_TASKS"] == "on")
         expected = (COMMANDS | (set(BOARD_COMMANDS) if boards else set())
-                    | (TASK_COMMANDS | set(TASK_ENTRY_COMMANDS) if tasks else set()))
+                    | (TASK_COMMANDS | set(TASK_ENTRY_COMMANDS) | TASK_VIEW_COMMANDS
+                       if tasks else set()))
         rows = palette(app, "commands")["results"]
         by_id = {row["key"]["command"]: row for row in rows}
         unexpected = sorted(set(by_id) - expected)
@@ -323,6 +327,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
         # A Markdown note in a group is selected: every way in is enabled.
         for key in TASK_ENTRY_COMMANDS if tasks else ():
             assert by_id[key]["enabled"] is True, key
+        for key in TASK_VIEW_COMMANDS if tasks else ():
+            assert by_id[key]["enabled"] is False, key
         # A Markdown note is open in a group: a new board can be made here,
         # and nothing is exported.
         for key, where in BOARD_COMMANDS.items():
@@ -350,6 +356,8 @@ def test_full_command_catalog_and_context_availability(vault: Path) -> None:
             assert by_id[key]["enabled"] is True, key
         for key, enabled in TASK_ENTRY_COMMANDS.items() if tasks else ():
             assert by_id[key]["enabled"] is enabled, key
+        for key in TASK_VIEW_COMMANDS if tasks else ():
+            assert by_id[key]["enabled"] is False, key
         assert set(by_id) == expected
         # No group is selected: a board can be neither made nor exported.
         for key in BOARD_COMMANDS if boards else ():

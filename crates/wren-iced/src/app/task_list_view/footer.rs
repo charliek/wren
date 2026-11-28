@@ -3,6 +3,7 @@
 
 use iced::widget::row;
 use iced::{Element, Shrink};
+use wren_core::tasks_file::Layout;
 
 use crate::app::tasks_view::Scope;
 use crate::app::{App, Message};
@@ -60,11 +61,24 @@ impl App {
         line.into()
     }
 
-    /// The pieces of the keys' hint ([`HINT`]) that fit in `room`, whole
-    /// and from the first, with their separators; empty when not even the
-    /// first does. A word is never cut.
+    /// What the footer says the keys of the layout shown are: the list's,
+    /// and none on the board, whose keys are item 12.3's to name.
+    pub(in crate::app) fn task_view_hint(&self) -> &'static str {
+        match self.task_list.layout() {
+            Layout::List => HINT,
+            Layout::Board => "",
+        }
+    }
+
+    /// The pieces of the keys' hint ([`App::task_view_hint`]) that fit in
+    /// `room`, whole and from the first, with their separators; empty when
+    /// not even the first does. A word is never cut.
     pub(in crate::app) fn task_list_hint(&self, room: f32) -> String {
-        let pieces: Vec<&str> = HINT.split(HINT_SEPARATOR).collect();
+        let hint = self.task_view_hint();
+        if hint.is_empty() {
+            return String::new();
+        }
+        let pieces: Vec<&str> = hint.split(HINT_SEPARATOR).collect();
         let widths = (pieces.iter().enumerate()).map(|(index, piece)| {
             let gap = if index > 0 {
                 self.label_widths.of(HINT_SEPARATOR, 11.0, fonts::UI)

@@ -1087,10 +1087,18 @@ impl App {
         crate::macos_menu::sync_board(self.menu_enabled());
         #[cfg(test)]
         {
-            let board = crate::menu::MENUS
+            // The Board menu's items, then those that follow their command
+            // elsewhere, as the native menu registers them.
+            let mut board = crate::menu::MENUS
                 .iter()
                 .find(|menu| menu.kind == crate::menu::Kind::Board)
                 .map_or_else(Vec::new, |menu| crate::menu::commands(menu.rows));
+            let tasks = self.preferences.tasks;
+            board.extend(
+                (crate::menu::FOLLOWING.iter())
+                    .filter(|key| tasks || !CommandId::parse(key).is_some_and(CommandId::tasks))
+                    .map(|key| (*key, "")),
+            );
             let synced = {
                 let mut enabled = self.menu_enabled();
                 board.iter().map(|(key, _)| (*key, enabled(key))).collect()

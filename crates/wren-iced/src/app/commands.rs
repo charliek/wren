@@ -104,6 +104,8 @@ pub enum CommandId {
     HideNoteTasks,
     /// Show or hide the columns' task counts (`task-counts`).
     ToggleTaskCounts,
+    /// The task view's other layout, List or Board (item 12.1).
+    ToggleTaskBoard,
     /// A command for the open board; its rows are [`BOARD_DEFINITIONS`].
     Board(BoardCommand),
 }
@@ -382,6 +384,15 @@ definitions![
         ToggleTaskCounts,
         "view.toggle_task_counts",
         "Toggle task counts",
+        "View",
+        App
+    ),
+    // The task view's layout (item 12.1): enabled only while a view shows,
+    // and with no default key; `B` flips it in the view.
+    (
+        ToggleTaskBoard,
+        "tasks.toggle_board",
+        "Toggle task board",
         "View",
         App
     ),
@@ -1118,11 +1129,16 @@ impl CommandId {
     }
 
     /// Whether the command is one of the ways into the task view or out of
-    /// it (item 10.2): App commands, unlike the task line commands.
+    /// it (item 10.2), or the view's layout switch (item 12.1): App
+    /// commands, unlike the task line commands.
     pub fn task_entry(self) -> bool {
         matches!(
             self,
-            Self::ShowTasks | Self::HideGroupTasks | Self::HideNoteTasks | Self::ToggleTaskCounts
+            Self::ShowTasks
+                | Self::HideGroupTasks
+                | Self::HideNoteTasks
+                | Self::ToggleTaskCounts
+                | Self::ToggleTaskBoard
         )
     }
 
@@ -1362,6 +1378,7 @@ impl App {
             TaskEdit => self.task_form_can_open(),
             ShowTasks => self.session.is_some(),
             ToggleTaskCounts => true,
+            ToggleTaskBoard => self.task_view().is_some(),
             HideGroupTasks => self
                 .selected_group
                 .is_some_and(|group| self.hide_title(ItemRef::Group(group)).is_some()),
@@ -1701,6 +1718,7 @@ impl App {
                 None => self.blocked("There is nothing to show the tasks of"),
             },
             ToggleTaskCounts => self.toggle_task_counts(),
+            ToggleTaskBoard => self.toggle_task_board(),
             HideGroupTasks => {
                 let group = self.selected_group.expect("enabled group");
                 self.toggle_group_tasks(group)

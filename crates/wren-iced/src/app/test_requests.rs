@@ -1601,7 +1601,7 @@ impl App {
                         "trigger": menu::triggers(keymap, key, kind)
                             .next()
                             .map(ToString::to_string),
-                        "enabled": kind != Kind::Board || enabled(key),
+                        "enabled": !menu::follows_command(kind, key) || enabled(key),
                     }),
                     Row::Native(native) => json!({"native": format!("{native:?}")}),
                     Row::Separator => json!({"separator": true}),

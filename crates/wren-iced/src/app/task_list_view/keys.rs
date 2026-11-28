@@ -1,11 +1,14 @@
 //! The task view's keys, as any layout of it reads them: the batch gate,
 //! the app's shortcuts run in place, a held key's repeats, the menu over
-//! the view, and Tab and the arrows over the controls. The list's own
-//! keys, which move its selection, are in [`super::list`].
+//! the view, Tab and the arrows over the controls, and `B`, which flips
+//! the layout while the list or the board has the keyboard. The list's own
+//! keys, which move its selection, are in [`super::list`], the board's in
+//! [`super::board`].
 
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
 use iced::Task;
+use wren_core::tasks_file::{Layout, TaskFilters};
 
 use super::copies::AppCopy;
 use super::Control;
@@ -14,32 +17,53 @@ use crate::app::task_list;
 use crate::app::{App, Message};
 use crate::list_keys::{ListKey, Press};
 
-impl App {
-    /// The slots Tab walks, in order.
-    fn task_view_slots(&self) -> Vec<Option<Control>> {
-        let filters = self
-            .task_list
-            .built
-            .as_ref()
-            .map(|built| built.filters.clone())
-            .unwrap_or_default();
-        let mut slots = vec![Some(Control::Scope)];
+/// The slots Tab walks, in order, with `filters` drawn: the controls in
+/// the order they stand, then the body (`None`). A control the layout does
+/// not draw is no slot.
+pub(super) fn task_view_slots(filters: &TaskFilters) -> Vec<Option<Control>> {
+    let list = filters.layout == Layout::List;
+    let mut slots = vec![Some(Control::Scope), Some(Control::Layout)];
+    if list {
         slots.extend((0..task_list::CHIPS.len()).map(|chip| Some(Control::Chip(chip))));
         if !filters.statuses.is_empty() {
             slots.push(Some(Control::ShowAll));
         }
-        slots.extend(
-            [
-                Control::Owner,
-                Control::GroupBy,
-                Control::Due,
-                Control::Priority,
-                Control::HideOld,
-            ]
-            .map(Some),
-        );
-        slots.push(None);
-        slots
+    }
+    slots.push(Some(Control::Owner));
+    if list {
+        slots.push(Some(Control::GroupBy));
+    }
+    slots.extend([Control::Due, Control::Priority, Control::HideOld].map(Some));
+    slots.push(None);
+    slots
+}
+
+/// Whether `press` is `B`, the view's layout switch: a letter, Shift or
+/// not, as the row's letters are read.
+fn is_layout_key(press: &Press) -> bool {
+    press
+        .key
+        .to_latin(press.physical)
+        .map(|key| key.to_ascii_lowercase())
+        == Some('b')
+}
+
+impl App {
+    /// Whether the layout the view's filters now give draws `control`.
+    pub(super) fn control_shown(&self, control: Control) -> bool {
+        let filters = self
+            .task_view()
+            .map(|scope| self.task_filters(scope))
+            .unwrap_or_default();
+        task_view_slots(&filters).contains(&Some(control))
+    }
+
+    /// The slots Tab walks, in order, for the view as built.
+    fn task_view_slots(&self) -> Vec<Option<Control>> {
+        let filters = (self.task_list.built.as_ref())
+            .map(|built| built.filters.clone())
+            .unwrap_or_default();
+        task_view_slots(&filters)
     }
 
     /// Tab (`step` 1) or Shift+Tab (-1); `controls` keeps to the controls,
@@ -119,6 +143,11 @@ impl App {
             Some(AppCopy::Shortcut(accel))
                 if crate::app::task_describe::is_describe_key(&accel) =>
             {
+                // No field opens over a card the board does not show yet
+                // (item 12.3).
+                if self.task_list.layout() == Layout::Board {
+                    return Task::none();
+                }
                 let (task, stops) = self.describe_key();
                 if stops {
                     self.task_list.stopped = true;
@@ -135,6 +164,12 @@ impl App {
             Some(AppCopy::Shortcut(accel)) => {
                 let id = (self.preferences.keymap.action(&accel))
                     .and_then(crate::app::commands::CommandId::parse);
+                // Nor does the toggle act on one (item 12.3).
+                if self.task_list.layout() == Layout::Board
+                    && id == Some(crate::app::commands::CommandId::ToggleTask)
+                {
+                    return Task::none();
+                }
                 if let Some(task) = id.and_then(|id| self.task_view_shortcut(id)) {
                     return task;
                 }
@@ -179,6 +214,7 @@ impl App {
             ),
             None => {
                 matches!(press.key, Key::Named(Named::Enter | Named::Space))
+                    || is_layout_key(press)
                     || matches!(
                         RowAct::of(press),
                         Some(
@@ -235,7 +271,17 @@ impl App {
                 _ => (Task::none(), false),
             };
         }
-        self.list_press(press)
+        // B flips the layout, read wherever the body has the keyboard.
+        if is_layout_key(press) {
+            let task = self
+                .change_layout(Layout::other)
+                .map_or_else(Task::none, |outcome| outcome.task);
+            return (task, false);
+        }
+        match self.task_list.layout() {
+            Layout::List => self.list_press(press),
+            Layout::Board => self.board_press(press),
+        }
     }
 
     /// Escape's step for a control: the keyboard goes back to the list.
@@ -254,7 +300,12 @@ mod tests {
         let (_directory, mut app) = fixture();
         batch(&mut app, &[named(Named::Tab)]);
         assert_eq!(app.task_list.focus, Some(Control::Scope));
-        batch(&mut app, &[named(Named::Tab), named(Named::Tab)]);
+        // The List | Board switch stands between the scope chip and the
+        // status chips (item 12.1).
+        batch(
+            &mut app,
+            &[named(Named::Tab), named(Named::Tab), named(Named::Tab)],
+        );
         assert_eq!(app.task_list.focus, Some(Control::Chip(1)));
         // Space presses a chip, and the keyboard stays on it.
         batch(&mut app, &[named(Named::Space)]);

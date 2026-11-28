@@ -62,6 +62,12 @@
 //! `held` where a write left it, and where it and its cells were drawn
 //! (`bounds`, `cells`).
 //!
+//! The layout (item 12.1): the list's `layout` is `"list"` or `"board"`,
+//! and `board` the board's columns (`null` on the list). `{"click":
+//! {"layout": "list" | "board"}}` clicks that segment of the List | Board
+//! switch, and `{"click": {"control": "layout"}}` presses the switch as
+//! Enter on it does, flipping it.
+//!
 //! A description edited in place (item 10.5): `{"key": {"key": "f2"}}` on
 //! the selected row, or `{"click": {"describe": n}}`, a double-click on the
 //! nth row's description, opens its field. While it is open `{"key": …}`
@@ -812,6 +818,7 @@ impl App {
         let event = if let Some(name) = click.get("control").and_then(Value::as_str) {
             let controls = [
                 Control::Scope,
+                Control::Layout,
                 Control::Chip(0),
                 Control::Chip(1),
                 Control::Chip(2),
@@ -828,6 +835,12 @@ impl App {
                 .find(|control| control.name() == name)
                 .ok_or_else(|| format!("no control {name:?}"))?;
             Click::Control(control)
+        } else if let Some(layout) = click.get("layout") {
+            Click::Layout(match layout.as_str() {
+                Some("list") => wren_core::tasks_file::Layout::List,
+                Some("board") => wren_core::tasks_file::Layout::Board,
+                other => return Err(format!("no layout {other:?}: list or board")),
+            })
         } else if let Some(entry) = row("row")? {
             Click::Select {
                 generation: self.task_list.generation,
@@ -902,7 +915,8 @@ impl App {
             })
         } else {
             return Err(
-                "click needs control, row, source, describe, right, cell, menu or outside".into(),
+                "click needs control, layout, row, source, describe, right, cell, menu or outside"
+                    .into(),
             );
         };
         let serial = self.task_list.next_serial();
@@ -1037,7 +1051,15 @@ impl App {
             }
         }
         let (counts, left_out) = self.task_list_counts(scope);
+        let board = filters.layout == wren_core::tasks_file::Layout::Board;
         json!({
+            "layout": if board { "board" } else { "list" },
+            "board": board.then(|| json!({
+                "columns": super::task_list_view::BOARD_COLUMNS
+                    .iter()
+                    .map(|(status, label)| json!({"status": status.name(), "label": label}))
+                    .collect::<Vec<_>>(),
+            })),
             "filters": {
                 "statuses": filters.statuses.iter().map(|status| status.name()).collect::<Vec<_>>(),
                 "owner": owner,
@@ -1061,7 +1083,7 @@ impl App {
             "open": counts.open_and_doing,
             "overdue": counts.overdue,
             "left_out": left_out,
-            "hint": super::task_list_view::HINT,
+            "hint": self.task_view_hint(),
             "empty": listing.entries.is_empty().then(|| {
                 super::task_list_view::empty_hint(
                     &filters,

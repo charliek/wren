@@ -1877,7 +1877,11 @@ fn board_menu(app: &App) -> Vec<&'static str> {
     // What the items were last set to, wherever the menu holds them as
     // up to date, is what they would be set to now.
     if app.menu_current() {
-        assert_eq!(app.menu_synced, listed, "the items as last synced");
+        assert_eq!(
+            app.menu_synced[..listed.len()],
+            listed,
+            "the items as last synced"
+        );
     }
     listed
         .into_iter()

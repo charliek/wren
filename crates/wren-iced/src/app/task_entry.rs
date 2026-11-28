@@ -1197,6 +1197,8 @@ mod tests {
                 ("note.hide_tasks", "This note", CommandScope::App),
                 ("group.hide_tasks", "Workspace", CommandScope::App),
                 ("view.toggle_task_counts", "View", CommandScope::App),
+                // The view's layout switch (item 12.1), with no key.
+                ("tasks.toggle_board", "View", CommandScope::App),
             ]
         );
         for (key, _, _) in &rows {
@@ -1218,7 +1220,7 @@ mod tests {
                 keymap.accel("view.toggle_task_counts"),
                 scheme.parse("mod+shift+h").as_ref()
             );
-            for key in ["note.hide_tasks", "group.hide_tasks"] {
+            for key in ["note.hide_tasks", "group.hide_tasks", "tasks.toggle_board"] {
                 assert_eq!(keymap.accel(key), None, "{scheme:?} {key}");
             }
             // Neither key is a chord a text field or the editor takes as

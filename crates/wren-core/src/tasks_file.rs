@@ -13,6 +13,7 @@
 //! owner = "@sam"
 //! group = "due"
 //! hide_old = false
+//! layout = "board"
 //! ```
 //!
 //! - `exclude` lists sections and groups whose tasks every rollup leaves
@@ -20,7 +21,9 @@
 //! - `[views."<path>"]` holds the filters remembered for the view of one
 //!   scope: a section, a group or a note by its path, and the workspace as
 //!   `"."`. A key is written only while it differs from its default, and a
-//!   table only while it has a key.
+//!   table only while it has a key. `layout` is the view's layout, kept
+//!   beside its filters: written only as `"board"`, and read as the list
+//!   whatever else it says.
 //!
 //! The file is read leniently: an entry Wren cannot read (a path outside
 //! the workspace, an unknown word) is passed over, not an error. Unknown
@@ -116,6 +119,25 @@ impl DueBucket {
     }
 }
 
+/// How a view lays its tasks out: rows grouped in a list, or cards in a
+/// column for each status (discovery/tasks.md §11).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    #[default]
+    List,
+    Board,
+}
+
+impl Layout {
+    /// The other layout: what the List | Board switch flips to.
+    pub const fn other(self) -> Self {
+        match self {
+            Self::List => Self::Board,
+            Self::Board => Self::List,
+        }
+    }
+}
+
 /// The priority a view narrows to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PriorityFilter {
@@ -135,6 +157,9 @@ pub struct TaskFilters {
     pub hide_old: bool,
     pub due: Option<DueBucket>,
     pub priority: Option<PriorityFilter>,
+    /// Not a filter, but remembered with them for the scope: it narrows
+    /// nothing.
+    pub layout: Layout,
 }
 
 impl Default for TaskFilters {
@@ -146,6 +171,7 @@ impl Default for TaskFilters {
             hide_old: true,
             due: None,
             priority: None,
+            layout: Layout::List,
         }
     }
 }
@@ -220,6 +246,10 @@ impl TaskFilters {
                 .and_then(|word| BUCKETS.iter().find(|(_, name)| *name == word))
                 .map(|(bucket, _)| *bucket),
             priority: word("priority").and_then(priority_from),
+            layout: match word("layout") {
+                Some("board") => Layout::Board,
+                _ => Layout::List,
+            },
         }
     }
 
@@ -282,6 +312,10 @@ impl TaskFilters {
             "priority",
             self.priority
                 .map(|priority| Value::String(priority_word(priority))),
+        );
+        set(
+            "layout",
+            (self.layout == Layout::Board).then(|| Value::String("board".into())),
         );
     }
 }
@@ -757,6 +791,7 @@ mod tests {
             hide_old: false,
             due: Some(DueBucket::ThisWeek),
             priority: Some(PriorityFilter::Level(Priority::High)),
+            layout: Layout::List,
         };
         let scope = path("Work/Meetings");
         assert!(file.set_filters(Some(&scope), &filters).unwrap());
@@ -835,6 +870,96 @@ mod tests {
             "{saved}"
         );
         assert!(!saved.contains("statuses"), "{saved}");
+    }
+
+    /// The layout is written only as the board, beside the scope's
+    /// filters; the list removes it, and an all-list file names none.
+    #[test]
+    fn the_layout_is_written_only_for_the_board() {
+        let (directory, mut store) = store();
+        let mut file = TasksFile::load(&store);
+        let scope = path("Work");
+        let board = TaskFilters {
+            layout: Layout::Board,
+            ..TaskFilters::default()
+        };
+        // The list is the default: nothing to hold.
+        assert!(!file
+            .set_filters(Some(&scope), &TaskFilters::default())
+            .unwrap());
+        file.save(&mut store).unwrap();
+        assert_eq!(written(&directory), None);
+        assert!(file.set_filters(Some(&scope), &board).unwrap());
+        file.save(&mut store).unwrap();
+        assert_eq!(
+            written(&directory).unwrap(),
+            "schema_version = 1\n\n[views.Work]\nlayout = \"board\"\n"
+        );
+        let mut again = TasksFile::load(&store);
+        assert_eq!(again.filters(Some(&scope)), board);
+        // Each scope has its own.
+        assert_eq!(again.filters(None).layout, Layout::List);
+        assert_eq!(again.filters(Some(&path("Home"))).layout, Layout::List);
+        // Beside a filter, and back to the list: only the filter stays.
+        let narrowed = TaskFilters {
+            owner: OwnerFilter::Me,
+            ..board.clone()
+        };
+        assert!(again.set_filters(Some(&scope), &narrowed).unwrap());
+        again.save(&mut store).unwrap();
+        assert_eq!(
+            written(&directory).unwrap(),
+            "schema_version = 1\n\n[views.Work]\nlayout = \"board\"\nowner = \"me\"\n"
+        );
+        assert!(again
+            .set_filters(
+                Some(&scope),
+                &TaskFilters {
+                    layout: Layout::List,
+                    ..narrowed
+                }
+            )
+            .unwrap());
+        again.save(&mut store).unwrap();
+        assert_eq!(
+            written(&directory).unwrap(),
+            "schema_version = 1\n\n[views.Work]\nowner = \"me\"\n"
+        );
+        assert_eq!(Layout::List.other(), Layout::Board);
+        assert_eq!(Layout::Board.other(), Layout::List);
+    }
+
+    /// A layout Wren does not know is the list, as an unknown value of a
+    /// filter is its default; the scope's next save drops it as it drops
+    /// those.
+    #[test]
+    fn an_unknown_layout_is_the_list() {
+        for unknown in ["\"grid\"", "\"Board\"", "3", "[\"board\"]"] {
+            let (directory, mut store) = store();
+            write(
+                &directory,
+                &format!("[views.Work]\nlayout = {unknown}\ngroup = \"due\"\n"),
+            );
+            let mut file = TasksFile::load(&store);
+            assert_eq!(file.warning(), None);
+            let filters = file.filters(Some(&path("Work")));
+            assert_eq!(filters.layout, Layout::List, "{unknown}");
+            assert_eq!(filters.group_by, GroupBy::Due, "{unknown}");
+            file.set_filters(
+                Some(&path("Work")),
+                &TaskFilters {
+                    group_by: GroupBy::Owner,
+                    ..filters
+                },
+            )
+            .unwrap();
+            file.save(&mut store).unwrap();
+            assert_eq!(
+                written(&directory).unwrap(),
+                "schema_version = 1\n\n[views.Work]\ngroup = \"owner\"\n",
+                "{unknown}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The task view's clicks, and the routing of all of its input.
 
 use iced::Task;
+use wren_core::tasks_file::Layout;
 
 use super::{Cell, Control};
 use crate::app::columns::Column;
@@ -39,6 +40,8 @@ pub enum Click {
         entry: usize,
     },
     Control(Control),
+    /// A segment of the List | Board switch: show its layout.
+    Layout(Layout),
     Menu(host_menu::Event),
 }
 
@@ -219,11 +222,24 @@ impl App {
                 let opened = self.open_entry_menu(crate::app::task_menus::MenuKind::Task, entry);
                 Task::batch([selected, opened, self.column_focus()])
             }
+            // A control the layout shown does not draw (a status chip, Show
+            // all or Group by on the board) is nothing to click: a click
+            // queued before a switch does nothing after it.
+            Click::Control(control) if !self.control_shown(control) => Task::none(),
             Click::Control(control) => {
                 // A click leaves the keyboard with the list: only keys
                 // walk the controls.
                 self.column = Column::Editor;
                 let task = self.press_control(control);
+                self.task_list.focus = None;
+                Task::batch([task, self.column_focus()])
+            }
+            Click::Layout(layout) => {
+                // As a control's click: the keyboard stays with the body.
+                self.column = Column::Editor;
+                let task = self
+                    .change_layout(|_| layout)
+                    .map_or_else(Task::none, |outcome| outcome.task);
                 self.task_list.focus = None;
                 Task::batch([task, self.column_focus()])
             }
@@ -276,10 +292,16 @@ mod tests {
         let generation = app.task_list.generation;
         let order_badges = app.task_list.listing.rows().next().unwrap();
         // Doing's chip has the keys: Enter narrows the list to Review the
-        // budget, which now stands where Order badges was drawn.
+        // budget, which now stands where Order badges was drawn. The List |
+        // Board switch is the Tab stop after the scope chip (item 12.1).
         batch(
             &mut app,
-            &[named(Named::Tab), named(Named::Tab), named(Named::Tab)],
+            &[
+                named(Named::Tab),
+                named(Named::Tab),
+                named(Named::Tab),
+                named(Named::Tab),
+            ],
         );
         assert_eq!(app.task_list.focus, Some(Control::Chip(1)));
         let serial = app.task_list.next_serial();
