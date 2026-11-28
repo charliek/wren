@@ -240,9 +240,6 @@ impl App {
     /// chords (its toggle and undo) and the editor's (the field's edits)
     /// run nothing.
     fn describe_shortcut(&mut self, accel: Accel) -> Task<Message> {
-        self.task_list
-            .copies
-            .push_back((AppCopy::Shortcut(accel.clone()), true));
         let id = (self.preferences.keymap.action(&accel)).and_then(CommandId::parse);
         let Some(id) = id.filter(|id| {
             id.scope() == super::commands::Scope::App
@@ -274,11 +271,11 @@ impl App {
         // it or has closed. Each copy is spent.
         match &event {
             LineEvent::Escape | LineEvent::HeldEscape => {
-                self.task_list.copies.push_back((AppCopy::Escape, true));
+                self.task_list.copies.push(AppCopy::Escape);
             }
             LineEvent::Shortcut { accel, held } => {
+                self.task_list.copies.push(AppCopy::Shortcut(accel.clone()));
                 if *held || !current {
-                    (self.task_list.copies).push_back((AppCopy::Shortcut(accel.clone()), true));
                     return Task::none();
                 }
                 return self.describe_shortcut(accel.clone());

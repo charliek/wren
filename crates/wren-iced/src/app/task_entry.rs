@@ -1125,10 +1125,11 @@ mod tests {
             .unwrap()
             .clone();
         // A stale entry the view could never have left with tasks off.
-        app.task_list.copies.push_back((
-            super::super::task_list_view::AppCopy::Shortcut(palette.clone()),
-            true,
-        ));
+        app.task_list
+            .copies
+            .push(super::super::task_list_view::AppCopy::Shortcut(
+                palette.clone(),
+            ));
         let _ = app.update(Message::Key(Input::Accel(palette)));
         assert!(app.palette.is_some(), "the shortcut ran");
         assert_eq!(app.task_list.copies.len(), 1, "the queue was not asked");

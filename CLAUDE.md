@@ -104,8 +104,14 @@ when one lands, move what users need into `docs/` and trim the note.
     its key wrapper), `app/tasks_view.rs` (the task view's surface in the
     editor pane, its scope, and its stops in Back and Forward history),
     `app/task_list.rs` (the view's list as data: filters, groups, order and
-    held rows), `app/task_list_view.rs` (its controls, rows, keys and
-    footer), `list_keys.rs` (the view's key wrapper), `app/host_menu.rs`
+    held rows), `app/task_list_view.rs` with `app/task_list_view/` (the
+    view's state; what any layout of it shares: `build.rs` the listing,
+    `controls.rs` the filter bar and its menus, `menu.rs` the menu over
+    the view, `keys.rs` and `clicks.rs` its input, `copies.rs` the app's
+    copies of the keys it read, always dropped, `open.rs` a row's note
+    opened, `footer.rs` the pane's footer; and `list.rs`, the list
+    layout's body, rows and keys), `list_keys.rs` (the view's key
+    wrapper), `app/host_menu.rs`
     (a menu the app draws over the view), `app/task_target.rs` (the one
     write path for a row or the open note, and undo), `app/task_rows.rs`
     (a row's keys, clicks and writes), `app/task_describe.rs` (a row's
