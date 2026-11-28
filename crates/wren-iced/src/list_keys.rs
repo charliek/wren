@@ -6,9 +6,9 @@
 //! The view has no text field, so no key would otherwise be any widget's.
 //! The wrapper reports each press as a [`ListKey`] and captures it, except
 //! Escape and the shortcuts (anything with Ctrl, Alt or the logo key, and
-//! the function keys), which still reach the app's own key handling: it
-//! reports those only so the host can drop its copy of one that comes
-//! after its batch was stopped.
+//! the function keys), which still reach the app's own key handling: the
+//! host reads those at their place in the batch too, and drops the app's
+//! copy of each.
 //!
 //! **A batch boundary.** Each report carries the host's serial for the
 //! view it was built in, which is one batch of events: iced builds the view

@@ -1,6 +1,6 @@
 # Tasks: research and proposed design
 
-Status: **discovery, design settled.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`; the design review's decisions added 2026-11-24 (§2 items 18 to 29, §3.3). Ring 0 (the editor) and ring 1 (the summary view) are built; amendments from building them are marked "As built" and listed in §6.2 (ring 0) and §9.1 (ring 1), and the full record is `discovery/tasks-build.md` §10. Kanban is not. The first release is the editor alone (ring 0, §12), built on shared editor primitives (§6.1). The summary view (ring 1) follows straight after it, and kanban (ring 2) is a release of its own after that. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
+Status: **discovery, design settled.** Written 2026-11-15 against `main` at `0b23f89`; references re-checked against `ec1440b`; the design review's decisions added 2026-11-24 (§2 items 18 to 29, §3.3). Ring 0 (the editor) and ring 1 (the summary view) are built; amendments from building them are marked "As built" and listed in §6.2 (ring 0) and §9.1 (ring 1), and the full record is `discovery/tasks-build.md` §10. Kanban (ring 2) was settled with the owner on 2026-11-28 (§2 items 30 to 37, §11) and is not built; its build plan is `discovery/tasks-build.md` §11. The first release is the editor alone (ring 0, §12), built on shared editor primitives (§6.1). The summary view (ring 1) follows straight after it, and kanban (ring 2) is a release of its own after that. §2 records what the owner has decided; §3 lists every question and how it was answered. Line references are to `ec1440b`; find the named function if they have moved.
 
 ## 1. What we are building and why
 
@@ -48,6 +48,17 @@ Decided in the design review, 2026-11-24 (questions D1 to D16, §3.3):
 28. **Hide tasks in this note,** on a right-click in the Notes column and in the summary view, writes `tasks: off` into the note's front matter, with Undo; hidden notes get a "tasks off" mark in the Notes column (D16; §7).
 29. **Weekday words** mean the next one after today; `next fri` is Friday of next week (D11).
 
+Decided after ring 1 shipped (v0.3.0), 2026-11-28:
+
+30. **No saved views.** The filters each section, group or note remembers are enough (§9.1, §12).
+31. **Hiding a whole section stays out** until it is missed. A section can still be hidden by adding its path to `exclude` in `.wren/tasks.toml`.
+32. **The note-set scope stays deferred,** with multi-select in the Notes column; the view gets used first.
+33. **Suggestions keep Tab to pick and Enter to keep the word** (`discovery/tasks-build.md` §10, 2026-11-25, item 5.1), to be tuned after use. **Chips** (Q9): the coloured text stays; chips are a possible later change if daily use asks for them.
+34. **Ring 2 is a board of status columns,** as in the prototype: Open, Doing, Done and Cancelled, all four always shown. Cancelled is common enough to earn its column; hiding it when empty can be revisited after use. No owner, due or priority columns and no manual order in this ring.
+35. **Cards drag with the mouse** between columns, as well as moving with ⇧← and ⇧→. The mouse is expected to be the common way.
+36. **List or Board is remembered for each scope** in `.wren/tasks.toml`, beside its filters. The List | Board buttons, `B` in the view and a palette command switch it.
+37. **A narrow board scrolls sideways:** columns shrink to a minimum width, then the board scrolls horizontally.
+
 ## 3. Questions, and how each was answered
 
 | # | Question | Answer |
@@ -60,7 +71,7 @@ Decided in the design review, 2026-11-24 (questions D1 to D16, §3.3):
 | Q6 | Does priority ship in the first release? | **Resolved (§2 item 16).** |
 | Q7 | How many priority levels do Wren's pickers offer? (§3.1) | **Resolved (§2 item 17):** all five; ordered Highest to Lowest since the owner's change of 2026-11-26 |
 | Q8 | Where does `@` completion find owners in ring 0? (§3.1) | **Resolved (§2 item 17):** scan the notes the search index already holds, on demand; no task index until ring 1 |
-| Q9 | Are tokens shown as text or collapsed into chips? (§3.2) | **Resolved (§2 item 17):** text with colour first; decide on chips after use. As built, ring 0 shipped coloured text and no chips (item 2.2); whether chips are worth building stays open until the text has been used day to day |
+| Q9 | Are tokens shown as text or collapsed into chips? (§3.2) | **Resolved (§2 item 17):** text with colour first; decide on chips after use. As built, ring 0 shipped coloured text and no chips (item 2.2); after looking at chips beside the text, the owner kept the coloured text on 2026-11-28 (§2 item 33); chips are a possible later change |
 | Q10 | Where on the line does Wren write tokens, and in what order? (§3.2) | **Resolved (§2 item 17):** the end of the line, in Obsidian Tasks' own order |
 | Q11 | Does checking a box by hand add a done date? (§3.2) | **Resolved (§2 item 17):** no |
 | Q12 | When does auto-suggest appear? (§3.2) | **Resolved (§2 item 17):** task lines only, after two letters at the start of a word |
@@ -404,9 +415,9 @@ What building ring 1 changed in §7 to §10, in one place (the dated record is `
 - **Keys and clicks on a row.** Space toggles; S, P and D open the status menu, the priority menu and the calendar; E opens the form; `+` and `-` raise and lower; R refreshes. A click on the box cycles, on the priority or the date opens its menu or the calendar, and a right-click opens the task menu. The form over a row is centred.
 - **The description edited in place** (item 10.5): F2 on the selected row, or a double-click on its description (the prototype's double-click opened the form; here E does). Enter writes, Escape and a click elsewhere cancel.
 - **Not built in ring 1:**
-  - Saved views. The design names them, but not what one is beyond the per-scope filters that are already remembered, so they wait for the owner.
-  - Hiding a whole section. Only groups offer "Hide tasks from this group", although §7 item 2 says "a section or group"; meanwhile a section can be excluded by editing `.wren/tasks.toml`.
-  - The note-set scope, which waits for multi-select in the Notes column.
+  - Saved views. The design names them, but not what one is beyond the per-scope filters that are already remembered. Dropped (§2 item 30).
+  - Hiding a whole section. Only groups offer "Hide tasks from this group", although §7 item 2 says "a section or group"; meanwhile a section can be excluded by editing `.wren/tasks.toml`. Stays out until missed (§2 item 31).
+  - The note-set scope, which waits for multi-select in the Notes column. Deferred (§2 item 32).
 
 ## 10. Writing from a view
 
@@ -433,11 +444,20 @@ App-managed and beside `.wren/workspace.toml` (`crates/wren-core/src/workspace_s
 
 ## 11. Kanban (ring 2)
 
-- Columns are status types by default: Open, Doing, Done, Cancelled. Moving a card rewrites the character in its box through `EditTaskLine`.
-- **First release of the board: no manual order** (§2 item 19). Cards sort by priority, then due date, so no `🆔` is written and no view file is needed. The board is the summary view's second layout (List | Board), with the same scope, owner filter and keys; ⇧← and ⇧→ move a card. Manual order, below, comes later if it is missed.
+Settled with the owner on 2026-11-28 (§2 items 34 to 37). The board is the summary view's second layout, built on ring 1: the same scope, filters, keys, menus, form, write path and undo.
+
+- **Columns.** Open, Doing, Done and Cancelled, all four always, each headed with its count. An unknown box character is open. Each column scrolls on its own; below a minimum column width (about 200 px) the board scrolls sideways.
+- **Order.** No manual order: within a column, cards sort as the list's rows do (overdue first, then priority, then due date). No `🆔` is written and nothing is stored per card. A card whose status changes goes to its new column at once, in its sorted place there. Any other write that would move a card (a new priority or due date) or take it out of the filters keeps it where it is in its column until R, another filter or scope, or leaving the view, as rows do.
+- **The controls.** The status chips and Group by do not apply to a board and are hidden while it shows; the scope chip, the owner, due and priority filters and Hide done stay, so Done and Cancelled show the last 14 days by default. The List | Board switch sits in the controls bar; `B` in the view and the palette command **Toggle task board** flip it. The choice is kept for each scope in `.wren/tasks.toml`, written only when it is Board. Switching layout is not a stop in Back and Forward.
+- **A card** shows its description (wrapped, at most three lines, then "…"), the priority, the due date in words (red and bold when overdue), the owners, and the note it comes from (group › note). A done or cancelled card is struck through and shows its date. The selected card has the accent ring.
+- **Moving a card** rewrites its box through ring 1's write path, and the done and cancelled dates follow, as with the toggle: drag it to another column, or press ⇧← or ⇧→ for the next column. A drop in its own column, outside the board, or Escape during the drag does nothing. Each move shows the message with Undo, and ⌘Z / Ctrl+Z undoes it.
+- **Keys and clicks** are the list's where they mean the same: arrows move the selection (← and → to the nearest card in the next column), Space and ⌘↵ toggle done, S, P and D open the status menu, the priority menu and the calendar, E the form, `+` and `-` raise and lower the priority, F2 or a double-click on the description edits it, Enter opens the note at the line, and R refreshes. A click on a card's priority or date opens its menu or the calendar, and a right-click opens the task menu.
+
+Later, if missed (not in ring 2):
+
 - Card order within a column lives in `.wren/tasks.toml`, keyed by a task id. An id that survives edits is the hard part. The Obsidian-compatible answer is `🆔 x7k2`, the token Obsidian Tasks uses for dependencies, added to a task the first time it is reordered on a board. Tasks never reordered need no id and sort by due date.
 - Later column queries: by owner (one column per person), by due bucket, or by priority, where a move rewrites the owner, the date or the priority instead of the status.
-- **Editing a card** (§2 item 15). A card shows its priority badge, its due date (red when overdue) and its owners. The same keys and menus as the rollup set its status, due date and priority, and the card opens the "Create or edit task" form (§6). Optional swimlanes by priority give a priority-by-status grid, like TaskNotes' swimlanes.
+- Swimlanes by priority, for a priority-by-status grid like TaskNotes' swimlanes, and "copy for Jira" (§12).
 
 ## 12. Rings
 
@@ -451,7 +471,7 @@ The first release is **ring 0 alone**: writing and displaying tasks in the edito
   - owner completion from the notes the search index holds (Q8, §3.1);
   - done and cancelled dates;
   - auto-suggest, and the "Create or edit task" form opened from the editor;
-  - highlighting: the date red when overdue, owners, done tasks dimmed. Ring 0 shipped coloured text with no chips; whether tokens collapse into chips stays open until the text has been used day to day;
+  - highlighting: the date red when overdue, owners, done tasks dimmed. Ring 0 shipped coloured text with no chips, and the owner kept it (§2 item 33); chips are a possible later change;
   - spell check skipping the tokens;
   - a `tasks` setting gating all of it, off by default until the ring is done, as `boards` was.
 - **Ring 1: the rollup,** straight after ring 0:
@@ -460,8 +480,8 @@ The first release is **ring 0 alone**: writing and displaying tasks in the edito
   - the write path to closed notes (§10) and the view's undo;
   - folder exclusions (offered on groups; a section only by editing `.wren/tasks.toml`, §9.1), the note switch with Hide tasks in this note, and hide-older-work;
   - the column-header counts and `task-counts`;
-  - later in the ring: inline description edit (built) and saved views (deferred to the owner, §9.1).
-- **Ring 2: kanban,** a release of its own. Columns by status, sorted by priority and due date, with card editing; then saved order (`🆔`) if missed, swimlanes by priority, and owner, due-bucket and priority columns. Also "copy for Jira" (the description, owner and due date as plain text, the link back to the note left out).
+  - later in the ring: inline description edit (built) and saved views (dropped, §2 item 30).
+- **Ring 2: kanban,** a release of its own: the status board of §11, four columns sorted as the list, cards dragged with the mouse or moved with ⇧← and ⇧→, and edited with the list's keys and menus. Later, if missed: saved order (`🆔`), swimlanes by priority, and owner, due-bucket and priority columns. Also "copy for Jira" (the description, owner and due date as plain text, the link back to the note left out).
 - **Ring 3:** a user-defined status table (on hold, waiting); scheduled and start dates; recurrence as its own primitive; reminders.
 
 ## 13. Risks and spikes before building

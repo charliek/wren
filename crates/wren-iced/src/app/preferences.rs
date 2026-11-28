@@ -1134,9 +1134,9 @@ impl App {
         if matches!(input, Input::Nav(Nav::Escape | Nav::FieldEscape)) && self.take_escape_claim() {
             return Task::none();
         }
-        // A shortcut the task view dropped with the rest of a batch a key
-        // of its stopped, or ran itself: each copy is matched to its own
-        // report, before anything that opened in the batch can read it.
+        // A shortcut the task view read, at its place in its batch: each
+        // copy is matched to its own report and dropped, before anything
+        // that opened in the batch can read it.
         if let Input::Accel(accel) = &input {
             if self.preferences.tasks && self.take_task_list_shortcut(accel) {
                 return Task::none();
